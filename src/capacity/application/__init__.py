@@ -1,1 +1,1 @@
-"""Use cases: the shortener, SLI reports, alert evaluation, scenarios and rule generation. Depends on the domain."""
+"""Use cases: load tests, SLI reports, alert replay, rule generation and the readiness review."""

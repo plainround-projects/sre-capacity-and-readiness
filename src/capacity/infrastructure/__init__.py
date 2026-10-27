@@ -1,1 +1,1 @@
-"""Adapters: SQLite, files, HTTP clients and servers, metrics, logging and settings."""
+"""Adapters: HTTP servers and clients, PostgreSQL, Docker Compose, files, metrics, logging and settings."""

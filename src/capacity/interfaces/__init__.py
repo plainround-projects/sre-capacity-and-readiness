@@ -1,1 +1,1 @@
-"""Entry points: the service, the edge, the load generator, the fault injector and the SLO tools."""
+"""Entry points: the instance, the ledger, the load generator, the experiments and the SLO and capacity tools."""
