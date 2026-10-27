@@ -1,0 +1,11 @@
+{
+  "experiment": "restore",
+  "rows": 28467,
+  "source_rows": 28467,
+  "checksum": "bf8770c9e4873b03e190e580708611df",
+  "matched": true,
+  "dump_bytes": 332518,
+  "backup_seconds": 2.01,
+  "restore_seconds": 1.51,
+  "rto_target_seconds": 300.0
+}

@@ -1,0 +1,9 @@
+{
+  "experiment": "dependency",
+  "requests": 120,
+  "errors": 120,
+  "slowest_503_ms": 692.78,
+  "bound_ms": 750.0,
+  "fail_fast": true,
+  "instance_healthy": true
+}
