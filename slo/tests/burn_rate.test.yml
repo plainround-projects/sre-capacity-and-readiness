@@ -1,0 +1,56 @@
+# The SLO burn-rate alerts on the Envoy edge, replayed against the generated production rules. Series step once a minute.
+# The edge carries 1,000 requests per second (60,000 a minute).
+rule_files:
+  - ../generated/rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: healthy traffic fires nothing
+    interval: 1m
+    input_series:
+      - series: 'envoy_http_downstream_rq_xx{envoy_http_conn_manager_prefix="ingress_http",envoy_response_code_class="2"}'
+        values: "0+60000x119"
+      - series: 'envoy_http_downstream_rq_xx{envoy_http_conn_manager_prefix="ingress_http",envoy_response_code_class="5"}'
+        values: "0+0x119"
+    alert_rule_test:
+      - {eval_time: 100m, alertname: ApiAvailabilityFastBurn, exp_alerts: []}
+      - {eval_time: 100m, alertname: ApiAvailabilitySlowBurn, exp_alerts: []}
+
+  # Minutes 60 to 79: half of the edge's responses are 5xx, as when a lost zone's share of traffic is not retried.
+  - name: twenty minutes of half the responses failing pages on the fast burn, then clears
+    interval: 1m
+    input_series:
+      - series: 'envoy_http_downstream_rq_xx{envoy_http_conn_manager_prefix="ingress_http",envoy_response_code_class="2"}'
+        values: "0+60000x59 3570000+30000x19 4200000+60000x39"
+      - series: 'envoy_http_downstream_rq_xx{envoy_http_conn_manager_prefix="ingress_http",envoy_response_code_class="5"}'
+        values: "0+0x59 30000+30000x19 600000+0x39"
+    alert_rule_test:
+      - eval_time: 78m
+        alertname: ApiAvailabilityFastBurn
+        exp_alerts:
+          - exp_labels: {severity: page, slo: api_availability, journey: api}
+            exp_annotations:
+              summary: api_availability burns its error budget at more than 14.4x
+              description: Both the 1h and 5m windows exceed burn rate 14.4 (about 2.1% of the 28-day budget in 1h at that rate) and the 1h window holds at least 10 bad events. Target 99.9%.
+              runbook_url: docs/runbooks/api.md
+      - {eval_time: 118m, alertname: ApiAvailabilityFastBurn, exp_alerts: []}
+
+  # One request in five is slower than 50 ms for the whole hour: the le="50" bucket grows at 80 percent of the count.
+  - name: a fifth of requests over the latency threshold for an hour pages the latency SLO
+    interval: 1m
+    input_series:
+      - series: 'envoy_http_downstream_rq_time_count{envoy_http_conn_manager_prefix="ingress_http"}'
+        values: "0+60000x79"
+      - series: 'envoy_http_downstream_rq_time_bucket{envoy_http_conn_manager_prefix="ingress_http",le="50"}'
+        values: "0+60000x19 1200000+48000x59"
+    alert_rule_test:
+      - eval_time: 79m
+        alertname: ApiLatencyFastBurn
+        exp_alerts:
+          - exp_labels: {severity: page, slo: api_latency, journey: api}
+            exp_annotations:
+              summary: api_latency burns its error budget at more than 14.4x
+              description: Both the 1h and 5m windows exceed burn rate 14.4 (about 2.1% of the 28-day budget in 1h at that rate) and the 1h window holds at least 10 bad events. Target 99%.
+              runbook_url: docs/runbooks/api.md
+      - {eval_time: 15m, alertname: ApiLatencyFastBurn, exp_alerts: []}

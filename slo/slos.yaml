@@ -1,0 +1,35 @@
+# The SLOs of the service about to launch, measured at the Envoy edge. The p99 target is the lesson's fact:
+# 99% of requests under 50 ms. The rules in slo/generated are produced from this file.
+window_days: 28
+min_bad_events: 10
+
+journeys:
+  api:
+    rank: 1
+    working: A caller asks for work and gets the answer within 50 milliseconds, every time, even with a zone down.
+
+slos:
+  - name: api_availability
+    journey: api
+    kind: availability
+    target: 0.999
+    valid: Every request that reaches the Envoy edge.
+    good: Any response that is not a 5xx.
+    why: >-
+      The launch tolerates about 40 minutes of full outage in 28 days, which is a few bad releases caught by the
+      rollout test and rolled back, or one zone lost and found by the fleet alert.
+  - name: api_latency
+    journey: api
+    kind: latency
+    target: 0.99
+    threshold_ms: 50
+    valid: Every request that reaches the Envoy edge.
+    good: Answered in 50 ms or less, measured by the edge from request to last byte.
+    why: >-
+      The lesson's latency SLO, p99 under 50 ms. The capacity plan exists to keep it true at twice today's peak
+      with a zone lost; this SLO is how production would notice if it stopped being true.
+
+alerts:
+  - {name: fast_burn, severity: page, factor: 14.4, long_minutes: 60, short_minutes: 5}
+  - {name: slow_burn, severity: page, factor: 6, long_minutes: 360, short_minutes: 30}
+  - {name: budget_leak, severity: ticket, factor: 1, long_minutes: 4320, short_minutes: 360}

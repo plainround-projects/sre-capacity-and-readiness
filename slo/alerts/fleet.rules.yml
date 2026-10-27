@@ -1,0 +1,27 @@
+# The capacity plan as an alert. The plan says five healthy instances are needed to carry the projected peak at the
+# measured safe load (tests/unit/test_evidence.py keeps this number equal to the plan's evidence). Below five
+# the fleet cannot meet the SLO at peak even though no request has failed yet.
+groups:
+  - name: fleet-capacity
+    interval: 2s
+    rules:
+      - alert: FleetBelowPeakCapacity
+        expr: envoy_cluster_membership_healthy{envoy_cluster_name="app"} < 5
+        for: 10s
+        labels:
+          severity: page
+          service: app
+        annotations:
+          summary: Fewer than five healthy instances, which is the minimum that carries the projected peak
+          description: A zone may be down. At the projected peak the surviving instances are above their safe load.
+          runbook_url: docs/runbooks/zone-loss.md
+      - alert: FleetBelowFullStrength
+        expr: envoy_cluster_membership_healthy{envoy_cluster_name="app"} < 8
+        for: 30s
+        labels:
+          severity: ticket
+          service: app
+        annotations:
+          summary: At least one instance is unhealthy; the fleet has lost some of its headroom
+          description: Capacity is still enough for peak while five or more are healthy, but another loss may not be.
+          runbook_url: docs/runbooks/zone-loss.md
