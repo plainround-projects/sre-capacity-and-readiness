@@ -156,3 +156,33 @@ def _row(run: dict[str, Any], label: str) -> str:
     verdict = "yes" if run["within_slo"] else "no"
     cells = [label, run["healthy_instances"], f"{run['target_rps']:g}", run["p99_ms"], run["errors"], verdict]
     return "| " + " | ".join(str(cell) for cell in cells) + " |"
+
+
+def runbook_facts(evidence: EvidenceStore) -> dict[str, str]:
+    """The measured numbers each runbook quotes, by runbook file name; `make plan-doc` writes them into the runbooks."""
+    docs: dict[str, Any] = {name: evidence.load(name) for name in REQUIRED}
+    knee, plan, sweep, resized = docs["knee"], docs["plan"], docs["pool-sweep"], docs["fleet-pool-resized"]
+    detail = knee["knee"]
+    spread = "/".join(map(str, plan["distribution"]))
+    return {
+        "cpu-knee.md": (
+            f"One instance saturates at **{detail['knee_rps']:g} requests a second**: p99 jumps from "
+            f"{detail['baseline_p99_ms']} ms to {detail['knee_p99_ms']} ms there, with "
+            f"{detail['cpu_utilization_at_knee'] * 100:.0f}% of its one core in use. The safe load is "
+            f"**{knee['safe_rps']} requests a second** per instance."
+        ),
+        "pool-exhaustion.md": (
+            f"Sizing the pool as peak rate times hold time (**{sweep['naive_pool_size']}** connections for "
+            f"{plan['future_peak_rps']:g} requests a second at {sweep['hold_ms']:g} ms) failed at the projected peak; "
+            f"**{resized['pool_size']}** held it (the sweep is in `docs/capacity-plan.md`)."
+        ),
+        "zone-loss.md": (
+            f"The fleet is **{plan['total_instances']}** instances over three zones ({spread}). Losing the largest "
+            f"zone "
+            f"leaves **{plan['surviving_after_zone_loss']}**, and {plan['surviving_after_zone_loss']} instances at "
+            f"{plan['safe_rps_per_instance']:g} requests a second carry the projected peak of "
+            f"{plan['future_peak_rps']:g}. "
+            f"`FleetBelowPeakCapacity` pages below **{plan['instances_for_peak']}** healthy instances and "
+            f"`FleetBelowFullStrength` opens a ticket below **{plan['total_instances']}**."
+        ),
+    }

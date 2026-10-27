@@ -9,13 +9,15 @@
 
 ## What is known
 
-The ledger's pool is a **shared** resource: adding instances does not enlarge it. Sizing it as peak rate times hold
-time (**@NAIVE@** connections for @PEAK@ requests a second at 10 ms) failed at the projected peak; **@POOL@** held it
-(see the sweep in `docs/capacity-plan.md`).
+The ledger's pool is a **shared** resource: adding instances does not enlarge it.
+
+<!-- measured -->
+Run `make run` to measure this: the numbers are written here from `docs/evidence`.
+<!-- /measured -->
 
 ## Mitigate
 
-1. Raise the pool: `POOL_SIZE=@POOL@ docker compose up -d --no-deps --force-recreate ledger` (the database allows 100
+1. Raise the pool to the adopted size above: `POOL_SIZE=<size> docker compose up -d --no-deps --force-recreate ledger` (the database allows 100
    connections in total; keep the sum under that).
 2. If the database is the limit, shed or queue writes at the instances: the instances already fail fast (bound: the
    ledger timeout) instead of hanging.

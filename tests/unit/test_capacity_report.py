@@ -32,6 +32,7 @@ EVIDENCE = {
         "future_peak_rps": 2000,
         "growth_factor": 2,
         "safe_rps_per_instance": 375,
+        "instances_for_peak": 6,
         "total_instances": 9,
         "distribution": [3, 3, 3],
         "surviving_after_zone_loss": 6,
@@ -86,3 +87,13 @@ def test_a_knee_report_serializes_for_the_evidence_file():
     assert document["knee"]["saturated_resource"] == "cpu"
     assert document["steps"][0]["max_ms"] == 21.0
     assert KneeReport(steps, None, None, 0.25, 0.0).to_dict()["knee"] is None
+
+
+def test_the_runbook_facts_quote_the_measured_numbers_from_the_evidence():
+    facts = capacity_report.runbook_facts(Evidence(EVIDENCE))
+    assert set(facts) == {"cpu-knee.md", "pool-exhaustion.md", "zone-loss.md"}
+    assert "**500 requests a second**" in facts["cpu-knee.md"]
+    assert "**375 requests a second**" in facts["cpu-knee.md"]
+    assert "**20** connections" in facts["pool-exhaustion.md"]
+    assert "**40** held it" in facts["pool-exhaustion.md"]
+    assert "leaves **6**" in facts["zone-loss.md"]

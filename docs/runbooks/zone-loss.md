@@ -2,22 +2,25 @@
 
 ## Symptoms
 
-- `FleetBelowFullStrength` (ticket): fewer than 8 healthy instances. `FleetBelowPeakCapacity` (page): fewer than
-  @NEEDED@, the minimum that carries the projected peak.
+- `FleetBelowFullStrength` (ticket): fewer healthy instances than the fleet has. `FleetBelowPeakCapacity` (page): fewer
+  than the minimum that carries the projected peak (both numbers are in the facts above).
 - Dashboard panel "Healthy instances" drops by the size of a zone; edge p99 rises if the remaining instances are above
   their safe load.
 
 ## What is known
 
-The fleet is @TOTAL@ instances over three zones (@SPREAD@). Losing the largest zone leaves **@SURVIVORS@**, and
-@SURVIVORS@ instances at @SAFE@ requests a second carry the projected peak of @PEAK@. This was run, not assumed: with
-zone a stopped, the projected peak held the SLO (see `docs/capacity-plan.md`).
+<!-- measured -->
+Run `make run` to measure this: the numbers are written here from `docs/evidence`.
+<!-- /measured -->
+
+This was run, not assumed: `make zone-loss` stops the largest zone and runs the projected peak on the survivors
+(see `docs/capacity-plan.md`).
 
 ## Mitigate
 
 1. Confirm what is down: `docker compose ps`, and Envoy's view at <http://localhost:47281/clusters>.
-2. Below @NEEDED@ healthy, the fleet cannot carry the peak: shed load at the edge and add instances in the surviving
-   zones until healthy members times @SAFE@ covers the traffic.
+2. Below the minimum, the fleet cannot carry the peak: shed load at the edge and add instances in the surviving
+   zones until healthy members times the safe load covers the traffic.
 3. Restore the zone: `docker compose up -d --wait app-a1 app-a2 app-a3` (substitute the zone's instances) and wait for
    Envoy to show them healthy.
 
