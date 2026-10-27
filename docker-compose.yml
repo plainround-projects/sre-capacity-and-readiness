@@ -168,6 +168,7 @@ services:
   prometheus:
     image: prom/prometheus:v3.5.0
     restart: unless-stopped
+    cpus: 0.5
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=1d

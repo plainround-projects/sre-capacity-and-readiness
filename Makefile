@@ -13,7 +13,7 @@ export STEP_SECONDS ?= 10
 export SOAK_SECONDS ?= 120
 CHECK_SECONDS ?= 40
 
-.PHONY: help install up reset-fleet run knee soak plan plan-doc full-fleet zone-loss pool-sweep dependency-test rollout-test restore-test review \
+.PHONY: help install up reset-fleet run knee soak plan plan-doc full-fleet zone-loss pool-sweep dependency-test rollout-test restore-test review test-measurements \
         psql rules rules-check lint format test test-unit test-rules test-integration test-e2e audit check lock docker-build down clean
 
 help: ## list the targets
@@ -36,7 +36,7 @@ reset-fleet: ## recreate every instance without the shared dependency, at versio
 
 # The whole story, in the lesson's order: the knee, the safe load, the plan, the fleet and its lost zone, the next
 # bottleneck, the failures the review needs evidence for, and the review.
-run: up reset-fleet knee soak plan full-fleet zone-loss pool-sweep dependency-test rollout-test restore-test plan-doc review ## the whole capacity and readiness exercise (about 15 minutes)
+run: up reset-fleet knee soak plan full-fleet zone-loss pool-sweep dependency-test rollout-test restore-test plan-doc review test-measurements ## the whole capacity and readiness exercise (about 20 minutes on a quiet machine)
 
 knee: $(STAMP) ## step the load up on one instance until p99 climbs; names the saturated resource (STEP_SECONDS per step)
 	mkdir -p $(EVIDENCE)
@@ -96,7 +96,7 @@ format: $(STAMP) ## apply ruff's formatting and safe fixes
 	$(VENV)/bin/ruff format .
 
 test-unit: $(STAMP)
-	$(PY) -m pytest tests/unit tests/integration --cov=capacity --cov-report=term
+	$(PY) -m pytest tests/unit tests/integration -m 'not measurements' --cov=capacity --cov-report=term
 	$(PY) -m coverage report --include='src/capacity/domain/*,src/capacity/application/*' --fail-under=95
 
 # Replays series against the alert rules with promtool (needs Docker).
@@ -105,6 +105,10 @@ test-rules: ## promtool: check the rule files and replay series against them
 	docker run --rm --entrypoint promtool -v $(CURDIR)/slo:/slo:ro $(PROMTOOL_IMAGE) test rules /slo/tests/burn_rate.test.yml /slo/tests/fleet.test.yml
 
 test: test-unit test-rules ## unit and integration tests with coverage, then the promtool rule tests
+
+# The measurements are the files `make run` writes; these tests hold the documents and the lesson's Done when lines to them.
+test-measurements: $(STAMP) ## the committed measurements against the plan, the alerts, the runbooks and the lesson's Done when lines (after make run)
+	$(PY) -m pytest tests/unit/test_evidence.py tests/measurements -m measurements
 
 test-integration: $(STAMP) ## the instance and the ledger client over real sockets, in process
 	$(PY) -m pytest tests/integration -m integration

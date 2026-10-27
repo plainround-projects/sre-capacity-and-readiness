@@ -1,10 +1,11 @@
+# The demo-window rules (slo/generated/rules.demo.yml) are not loaded here: evaluating them every second would compete
+# with the load tests for CPU, and nothing in this project needs alerts that fire in seconds.
 global:
   scrape_interval: 2s
   evaluation_interval: 2s
 
 rule_files:
   - /etc/prometheus/rules/generated/rules.yml
-  - /etc/prometheus/rules/generated/rules.demo.yml
   - /etc/prometheus/rules/alerts/fleet.rules.yml
 
 scrape_configs:

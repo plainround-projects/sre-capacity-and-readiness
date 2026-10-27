@@ -76,6 +76,7 @@ asyncio_default_fixture_loop_scope = "function"
 markers = [
     "integration: real sockets in this process, no containers",
     "e2e: needs the Docker Compose stack (make up)",
+    "measurements: the lesson's Done when lines held against the committed measurements (make test-measurements)",
 ]
 
 [tool.coverage.run]
