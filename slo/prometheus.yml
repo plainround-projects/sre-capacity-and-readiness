@@ -1,0 +1,25 @@
+global:
+  scrape_interval: 2s
+  evaluation_interval: 2s
+
+rule_files:
+  - /etc/prometheus/rules/generated/rules.yml
+  - /etc/prometheus/rules/generated/rules.demo.yml
+  - /etc/prometheus/rules/alerts/fleet.rules.yml
+
+scrape_configs:
+  - job_name: edge
+    metrics_path: /stats/prometheus
+    static_configs:
+      - targets: ["lb:9901"]
+  - job_name: instances
+    static_configs:
+      - targets: ["app-a1:9101", "app-a2:9101", "app-a3:9101"]
+        labels: {zone: a}
+      - targets: ["app-b1:9101", "app-b2:9101", "app-b3:9101"]
+        labels: {zone: b}
+      - targets: ["app-c1:9101", "app-c2:9101"]
+        labels: {zone: c}
+  - job_name: ledger
+    static_configs:
+      - targets: ["ledger:9102"]

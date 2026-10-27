@@ -1,0 +1,74 @@
+# The edge: every request enters here, so Envoy's own counts and latency histogram are the SLIs. Eight instances in
+# three zones, active health checks against each instance's ops port, one retry on a refused connection so a
+# restarting instance never reaches a user.
+admin:
+  address:
+    socket_address: {address: 0.0.0.0, port_value: 9901}
+
+static_resources:
+  listeners:
+    - name: ingress
+      address:
+        socket_address: {address: 0.0.0.0, port_value: 8080}
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: ingress_http
+                route_config:
+                  name: local
+                  virtual_hosts:
+                    - name: app
+                      domains: ["*"]
+                      routes:
+                        - match: {prefix: "/"}
+                          route:
+                            cluster: app
+                            timeout: 2s
+                            retry_policy:
+                              retry_on: connect-failure,refused-stream,reset
+                              num_retries: 1
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+    - name: app
+      # Instances are addressed by name; Docker gives a recreated container a new address, so names are re-resolved
+      # every second (STRICT_DNS) and the health checks keep a not-yet-resolved instance out of rotation.
+      type: STRICT_DNS
+      dns_refresh_rate: 1s
+      dns_lookup_family: V4_ONLY
+      connect_timeout: 0.5s
+      lb_policy: ROUND_ROBIN
+      circuit_breakers:
+        thresholds:
+          - max_connections: 4096
+            max_pending_requests: 4096
+            max_requests: 4096
+      health_checks:
+        - timeout: 1s
+          interval: 1s
+          interval_jitter: 0.2s
+          unhealthy_threshold: 1
+          healthy_threshold: 1
+          http_health_check: {path: /healthz}
+      load_assignment:
+        cluster_name: app
+        endpoints:
+          - locality: {zone: a}
+            lb_endpoints:
+              - endpoint: {address: {socket_address: {address: app-a1, port_value: 8080}}, health_check_config: {port_value: 9101}}
+              - endpoint: {address: {socket_address: {address: app-a2, port_value: 8080}}, health_check_config: {port_value: 9101}}
+              - endpoint: {address: {socket_address: {address: app-a3, port_value: 8080}}, health_check_config: {port_value: 9101}}
+          - locality: {zone: b}
+            lb_endpoints:
+              - endpoint: {address: {socket_address: {address: app-b1, port_value: 8080}}, health_check_config: {port_value: 9101}}
+              - endpoint: {address: {socket_address: {address: app-b2, port_value: 8080}}, health_check_config: {port_value: 9101}}
+              - endpoint: {address: {socket_address: {address: app-b3, port_value: 8080}}, health_check_config: {port_value: 9101}}
+          - locality: {zone: c}
+            lb_endpoints:
+              - endpoint: {address: {socket_address: {address: app-c1, port_value: 8080}}, health_check_config: {port_value: 9101}}
+              - endpoint: {address: {socket_address: {address: app-c2, port_value: 8080}}, health_check_config: {port_value: 9101}}
