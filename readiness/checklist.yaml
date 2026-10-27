@@ -1,0 +1,44 @@
+# Who owns each checklist item and by when a failure of it is fixed. A failing item without an owner and a date is
+# refused by the review. `blocking: true` means a failure must be fixed before launch, not after.
+items:
+  slos:
+    owner: service owner
+    fix_by: 2026-11-03
+  dashboards:
+    owner: service owner
+    fix_by: 2026-11-03
+  runbooks:
+    owner: on-call lead
+    fix_by: 2026-11-03
+    blocking: true
+  rollout:
+    owner: release owner
+    fix_by: 2026-11-03
+    blocking: true
+  dependencies:
+    owner: service owner
+    fix_by: 2026-11-03
+  restore:
+    owner: database on-call
+    fix_by: 2026-11-03
+  ownership:
+    owner: engineering manager
+    fix_by: 2026-11-03
+    blocking: true
+  capacity:
+    owner: capacity owner
+    fix_by: 2026-11-03
+    blocking: true
+
+# A risk the team knowingly launches with. Each has an owner and the condition that reopens the question.
+accepted_risks:
+  - area: Autoscaling
+    check: The fleet is a fixed size, planned for the six-month peak
+    evidence: Load in the lesson's facts is steady and grows by a known factor, and a fixed fleet of eight carries twice today's peak with a zone lost; autoscaling is the lesson's stretch goal and is not built
+    owner: capacity owner
+    revisit_when: Traffic passes 1.5 times today's peak, or a launch event is expected to double traffic within minutes
+  - area: Failure domains of the teaching build
+    check: The three zones are labels on containers of one Docker host
+    evidence: The zone-loss test removes three instances at once, which models the capacity effect of a zone failure but not a shared network, power or control-plane failure
+    owner: service owner
+    revisit_when: The service is deployed to real zones, at which point the same test is repeated by shutting down a real zone's nodes
