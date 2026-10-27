@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -13,9 +14,11 @@ from capacity.domain.plan import plan_capacity
 from capacity.infrastructure.logging_setup import configure_logging
 from capacity.infrastructure.project_files import FileSystemProject, JsonEvidence, SloFilesCatalog, YamlChecklist
 
+_MEASURED = re.compile(r"<!-- measured -->.*?<!-- /measured -->", re.DOTALL)
 PEAK_RPS = 1000.0
 GROWTH = 2.0
 ZONES = 3
+COMPOSE_FLEET = 8  # instances defined in docker-compose.yml (3/3/2 over three zones)
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
@@ -49,6 +52,13 @@ def cmd_plan(args: argparse.Namespace) -> int:
         },
     )
     print(f"verified by running {plan.surviving_after_zone_loss} instances at {plan.future_peak_rps:g} rps: {verified}")
+    if plan.total_instances > COMPOSE_FLEET:
+        print(
+            f"the plan needs {plan.total_instances} instances but docker-compose.yml defines {COMPOSE_FLEET}: add "
+            "instances there (and to deploy/envoy.yaml and the fleet alert) before trusting the fleet runs",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
@@ -60,7 +70,11 @@ def cmd_report(args: argparse.Namespace) -> int:
     if absent:
         sys.exit(f"missing evidence: {', '.join(absent)}; run `make run`")
     (root / "docs" / "capacity-plan.md").write_text(capacity_report.render(evidence), encoding="utf-8")
-    print("wrote docs/capacity-plan.md")
+    for name, facts in capacity_report.runbook_facts(evidence).items():
+        path = root / "docs" / "runbooks" / name
+        block = f"<!-- measured -->\n{facts}\n<!-- /measured -->"
+        path.write_text(_MEASURED.sub(block.replace("\\", "\\\\"), path.read_text(encoding="utf-8")), encoding="utf-8")
+    print("wrote docs/capacity-plan.md and the measured facts in the runbooks")
     return 0
 
 

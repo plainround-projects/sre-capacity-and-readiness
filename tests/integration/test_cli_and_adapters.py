@@ -3,6 +3,8 @@
 import asyncio
 import json
 import shutil
+import subprocess
+import time
 from datetime import date
 
 import pytest
@@ -48,6 +50,38 @@ class TestAdapters:
         shutil.copytree(root / "slo", tmp_path / "slo")
         (tmp_path / "slo" / "generated" / "rules.yml").write_text("stale")
         assert not SloFilesCatalog(tmp_path).rules_in_sync()
+
+
+class TestComposeRetries:
+    @staticmethod
+    def _fake_docker(monkeypatch, stderrs):
+        calls = []
+
+        def fake_run(*_, **__):
+            calls.append(1)
+            err = stderrs[min(len(calls), len(stderrs)) - 1]
+            return subprocess.CompletedProcess([], 1 if err else 0, b"out", err.encode())
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr(time, "sleep", lambda _: None)
+        return calls
+
+    def test_a_transient_daemon_error_is_retried_until_it_works(self, monkeypatch, tmp_path):
+        calls = self._fake_docker(monkeypatch, ["502 Bad Gateway", "connection reset", ""])
+        assert compose.Compose(tmp_path).run("ps") == b"out"
+        assert len(calls) == 3
+
+    def test_a_real_error_fails_at_once(self, monkeypatch, tmp_path):
+        calls = self._fake_docker(monkeypatch, ["no such service: nope"])
+        with pytest.raises(compose.ComposeError, match="no such service"):
+            compose.Compose(tmp_path).run("up", "nope")
+        assert len(calls) == 1
+
+    def test_a_persistent_transient_error_gives_up_after_three_tries(self, monkeypatch, tmp_path):
+        calls = self._fake_docker(monkeypatch, ["Bad Gateway"])
+        with pytest.raises(compose.ComposeError):
+            compose.Compose(tmp_path).run("ps")
+        assert len(calls) == 3
 
 
 class TestCompose:
@@ -144,6 +178,13 @@ class TestCapacityCli:
         assert plan is not None
         assert (plan["instances_for_peak"], plan["total_instances"], plan["verified_by_lost_zone_run"]) == (5, 8, True)
         assert "ceil(2000 / 400) = 5" in capsys.readouterr().out
+
+    def test_the_plan_command_fails_when_the_plan_needs_more_instances_than_the_compose_file_defines(
+        self, tmp_path, root, capsys
+    ):
+        project = self.project(tmp_path, root, {"knee": {"safe_rps": 300}})
+        assert self.run(["plan", "--evidence", str(project / "docs" / "evidence")]) == 1
+        assert "docker-compose.yml defines 8" in capsys.readouterr().err
 
     def test_the_plan_command_refuses_to_guess_without_a_measurement(self, tmp_path):
         with pytest.raises(SystemExit, match="no safe load"):

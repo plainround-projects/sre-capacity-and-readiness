@@ -12,6 +12,9 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+_ATTEMPTS = 3
+_RETRY_PAUSE_SECONDS = 2.0
+_TRANSIENT = ("Bad Gateway", "request returned", "connection reset", "EOF", "i/o timeout")
 HEALTHY_MEMBERS_URL = "http://localhost:47281/stats?filter=cluster.app.membership_healthy"
 
 
@@ -29,21 +32,28 @@ class Compose:
     def run(
         self, *args: str, env: dict[str, str] | None = None, stdin: bytes | None = None, timeout: float = 600
     ) -> bytes:
-        """Run `docker compose <args>` and return standard output; raise ComposeError on a non-zero exit."""
-        result = subprocess.run(
-            ["docker", "compose", *args],
-            cwd=self._dir,
-            env={**os.environ, **(env or {})},
-            input=stdin,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise ComposeError(
-                f"docker compose {' '.join(args)} failed: {result.stderr.decode(errors='replace')[-800:]}"
+        """Run `docker compose <args>` and return standard output; raise ComposeError on a non-zero exit.
+
+        A busy Docker daemon sometimes answers with a transient error ("Bad Gateway", a reset connection); those are
+        retried, anything else fails at once.
+        """
+        for attempt in range(1, _ATTEMPTS + 1):
+            result = subprocess.run(
+                ["docker", "compose", *args],
+                cwd=self._dir,
+                env={**os.environ, **(env or {})},
+                input=stdin,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
             )
-        return result.stdout
+            if result.returncode == 0:
+                return result.stdout
+            stderr = result.stderr.decode(errors="replace")
+            if attempt == _ATTEMPTS or not any(marker in stderr for marker in _TRANSIENT):
+                raise ComposeError(f"docker compose {' '.join(args)} failed: {stderr[-800:]}")
+            time.sleep(attempt * _RETRY_PAUSE_SECONDS)
+        raise AssertionError("unreachable")  # pragma: no cover
 
     def recreate(self, services: Sequence[str], env: dict[str, str] | None = None) -> None:
         """Recreate the services (stop the old container gracefully, start a new one) and wait until healthy."""
