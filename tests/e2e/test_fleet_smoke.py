@@ -1,6 +1,7 @@
 """Smoke tests of the running fleet. Needs `make up` first."""
 
 import json
+import time
 import urllib.request
 
 import pytest
@@ -16,9 +17,10 @@ PROMETHEUS = "http://localhost:47290"
 
 
 def fetch(url: str) -> tuple[int, dict[str, str], str]:
+    """GET a URL; header names come back lower-cased (Envoy lower-cases them)."""
     try:
         with urllib.request.urlopen(url, timeout=10) as response:
-            return response.status, dict(response.headers), response.read().decode()
+            return response.status, {k.lower(): v for k, v in response.headers.items()}, response.read().decode()
     except OSError as error:
         pytest.fail(f"{url} is not reachable ({error}); run `make up` first")
 
@@ -29,8 +31,8 @@ def test_requests_through_the_edge_reach_every_instance_in_every_zone():
     for _ in range(120):
         status, headers, _ = fetch(f"{EDGE}/work")
         assert status == 200
-        seen.add(headers["X-Instance"])
-        zones.add(headers["X-Zone"])
+        seen.add(headers["x-instance"])
+        zones.add(headers["x-zone"])
     assert zones == {"a", "b", "c"}
     assert len(seen) == 8
 
@@ -49,8 +51,11 @@ def test_every_metric_the_dashboards_and_alerts_query_is_really_exported():
 
 
 def test_prometheus_scrapes_the_edge_the_instances_and_the_ledger():
-    _, _, body = fetch(f"{PROMETHEUS}/api/v1/targets")
-    targets = json.loads(body)["data"]["activeTargets"]
+    for _ in range(30):
+        targets = json.loads(fetch(f"{PROMETHEUS}/api/v1/targets")[2])["data"]["activeTargets"]
+        if len(targets) >= 10:
+            break
+        time.sleep(1)
     jobs = {target["labels"]["job"] for target in targets}
     assert jobs == {"edge", "instances", "ledger"}
     assert len([t for t in targets if t["labels"]["job"] == "instances"]) == 8
