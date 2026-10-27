@@ -65,12 +65,11 @@ async def knee_test(
 ) -> KneeReport:
     """Step the load up, record each step, stop once the knee is clearly passed, and choose the safe load below it.
 
-    The search stops two steps after the first step that is more than three times the flat baseline, which is
-    enough to see the shape on both sides of the knee without driving the instance into the ground.
+    The search stops once two steps beyond a knee that has persisted have been measured, which is enough to see the
+    shape on both sides of it without driving the instance into the ground. A spike that goes away is not a knee.
     """
     results: list[StepResult] = []
     worst_lag = 0.0
-    passed_knee_at: int | None = None
     for rps in steps_rps:
         before = await probe.cpu_seconds() if probe else None
         samples, lag = await runner.run(rps, step_seconds)
@@ -78,9 +77,8 @@ async def knee_test(
         utilization = None if before is None or after is None else (after - before) / step_seconds
         results.append(summarize(samples, rps, step_seconds, utilization))
         worst_lag = max(worst_lag, lag)
-        if passed_knee_at is None and _looks_like_knee(results):
-            passed_knee_at = len(results)
-        if passed_knee_at is not None and len(results) >= passed_knee_at + 2:
+        found = _knee_so_far(results)
+        if found is not None and sum(1 for step in results if step.target_rps > found.knee_rps) >= 2:
             break
     try:
         knee = find_knee(results)
@@ -89,12 +87,11 @@ async def knee_test(
     return KneeReport(tuple(results), knee, safe_load(knee, margin), margin, worst_lag)
 
 
-def _looks_like_knee(results: list[StepResult]) -> bool:
+def _knee_so_far(results: list[StepResult]) -> Knee | None:
     try:
-        find_knee(results)
+        return find_knee(results)
     except NoKneeError:
-        return False
-    return True
+        return None
 
 
 @dataclass(frozen=True, slots=True)

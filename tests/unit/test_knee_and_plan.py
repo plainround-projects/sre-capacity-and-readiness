@@ -47,6 +47,15 @@ class TestKnee:
         steps = [step(100, 12.0), step(200, 12.0), step(300, 12.0), step(400, 14.0, errors=50)]
         assert find_knee(steps).knee_rps == 400
 
+    def test_a_spike_that_goes_away_again_is_noise_not_a_knee(self):
+        noisy = [step(100, 12.0), step(200, 12.0), step(300, 12.0), step(400, 90.0), step(500, 13.0), step(600, 14.0)]
+        with pytest.raises(NoKneeError):
+            find_knee(noisy)
+
+    def test_a_rise_that_persists_is_the_knee_even_if_it_dips_later(self):
+        steps = [step(100, 12.0), step(200, 12.0), step(300, 12.0), step(400, 90.0), step(500, 400.0), step(600, 30.0)]
+        assert find_knee(steps).knee_rps == 400
+
     def test_steps_given_out_of_order_are_sorted(self):
         assert find_knee(list(reversed(LESSON))).knee_rps == 550
 

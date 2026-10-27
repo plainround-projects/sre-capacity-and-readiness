@@ -51,18 +51,26 @@ class Knee:
 
 
 def find_knee(steps: list[StepResult], rise_factor: float = RISE_FACTOR) -> Knee:
-    """The first step whose p99 exceeds `rise_factor` times the flat baseline, or that fails more than 1% of requests.
+    """The first step whose p99 exceeds `rise_factor` times the flat baseline, or that fails more than 1% of requests,
+    and stays that bad on the next step (a spike that goes away again is noise, not a knee).
 
-    The baseline is the median p99 of the first three steps. Steps must be in rising order of load.
+    The baseline is the median p99 of the first three steps. Steps must be in rising order of load. The last step
+    needs no successor: the test stops a couple of steps past the knee, so the final step is a candidate by itself.
     """
     if len(steps) <= BASELINE_STEPS:
         raise NoKneeError(f"need more than {BASELINE_STEPS} steps to see a flat part and a knee")
     ordered = sorted(steps, key=lambda step: step.target_rps)
     baseline = median(step.p99_ms for step in ordered[:BASELINE_STEPS])
-    for index, step in enumerate(ordered):
-        if index >= BASELINE_STEPS and (step.p99_ms > rise_factor * baseline or step.error_rate > 0.01):
+
+    def broken(step: StepResult) -> bool:
+        return step.p99_ms > rise_factor * baseline or step.error_rate > 0.01
+
+    for index in range(BASELINE_STEPS, len(ordered)):
+        persists = index + 1 == len(ordered) or broken(ordered[index + 1])
+        if broken(ordered[index]) and persists:
+            step = ordered[index]
             return Knee(step.target_rps, ordered[index - 1].target_rps, baseline, step.p99_ms, step.cpu_utilization)
-    raise NoKneeError("p99 never rose sharply; raise the load further")
+    raise NoKneeError("p99 never rose sharply and stayed up; raise the load further")
 
 
 def safe_load(knee: Knee, margin: float = 0.25, step: int = STEP_ROUNDING) -> int:
