@@ -125,6 +125,7 @@ readiness/           checklist.yaml: owners, fix dates, blocking flags and accep
 dashboards/          fleet.json, a Grafana dashboard whose queries the review verifies.
 deploy/              envoy.yaml, the load balancer configuration.
 sql/                 000_roles.sh (least-privilege role), 001_schema.sql, 002_seed.sql, 003_queries.sql.
+tech/                one beginner-level note per technology used here (start at tech/README.md).
 docs/                the capacity plan and launch decision (both generated), evidence, runbooks, ownership,
                      decision records.
 docker-compose.yml   8 instances in 3 zones, Envoy, ledger, PostgreSQL, Prometheus, the load generator.

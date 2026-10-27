@@ -1,0 +1,240 @@
+# promtool (rule checks and replay tests)
+
+## What it is
+
+`promtool` is a command-line program that ships with Prometheus. Two of its commands matter here:
+
+- `promtool check rules FILE...` reads rule files and says whether they are valid.
+- `promtool test rules TESTFILE...` **replays** made-up metric series against the rules and checks which alerts fire at chosen moments.
+
+A test is a small experiment on time: "if all five connections were held from second 3 onward, does the alert fire at second 4 and stay quiet at second 3.5?"
+
+## Why this repository uses it
+
+Alert rules cannot be reviewed by reading alone: a wrong threshold or an off-by-one in a sample count shows up only during a real failure. The replay tests prove, without a real failure, the claims the capacity plan depends on: losing a zone (three of eight instances) leaves five, which opens a **ticket** and does not page; four healthy instances cannot carry the peak and **do page**; a one-sample dip is noise and pages nobody; healthy traffic fires no burn-rate alert; half the edge's responses failing for twenty minutes pages and then clears.
+
+## Where it appears
+
+| File | What it tests |
+| --- | --- |
+| `slo/tests/fleet.test.yml` | The hand-written capacity alerts `FleetBelowPeakCapacity` and `FleetBelowFullStrength`. |
+| `slo/tests/burn_rate.test.yml` | The generated burn-rate alerts on Envoy's metrics (`ApiAvailabilityFastBurn`, `ApiAvailabilitySlowBurn`, `ApiLatencyFastBurn`). |
+| `Makefile` (`test-rules`) | Runs `promtool` in the `prom/prometheus:v3.5.0` image. |
+| `.github/workflows/ci.yml` | The `rules` job. |
+
+## How it works underneath
+
+- A test gives `input_series`: for each series, a label set and `values` written in a compact **expanding notation**. `a+bxn` means start at `a`, add `b` each step, for `n` steps (n+1 values). `"0+60000x119"` is a counter rising by 60,000 per step. `"8x9 5x39 8x30"` is eight for ten samples, five for forty, eight for thirty-one: parts separated by spaces are joined. A single number repeats once: `"8x9 3 8x30"` has one sample of 3 among 8s.
+- `interval` is the time between samples; `evaluation_interval` is how often rules run.
+- `alert_rule_test` lists checks: at `eval_time`, the alert named `alertname` should have exactly `exp_alerts` active. `[]` means "no alert".
+- promtool loads the rule files, feeds the series into a temporary evaluation engine, evaluates, and compares labels and annotations word for word. Exit code 0 means every check passed.
+
+## Walkthrough of this repository's use
+
+### Running it
+
+```make
+# Replays series against the alert rules with promtool (needs Docker).
+test-rules: ## promtool: check the rule files and replay series against them
+	docker run --rm --entrypoint promtool -v $(CURDIR)/slo:/slo:ro $(PROMTOOL_IMAGE) check rules /slo/generated/rules.yml /slo/generated/rules.demo.yml /slo/alerts/fleet.rules.yml
+	docker run --rm --entrypoint promtool -v $(CURDIR)/slo:/slo:ro $(PROMTOOL_IMAGE) test rules /slo/tests/burn_rate.test.yml /slo/tests/fleet.test.yml
+```
+
+The `docker run` flags are explained in the Docker note. `check rules` validates the three rule files; `test rules` replays the two test files.
+
+### Losing a zone: a ticket, not a page
+
+```yaml
+# The capacity plan as an alert. The plan says five healthy instances are needed to carry the projected peak at the
+# measured safe load (tests/unit/test_evidence.py keeps this number equal to the plan's evidence). Below five
+# the fleet cannot meet the SLO at peak even though no request has failed yet.
+groups:
+  - name: fleet-capacity
+    interval: 2s
+    rules:
+      - alert: FleetBelowPeakCapacity
+        expr: envoy_cluster_membership_healthy{envoy_cluster_name="app"} < 5
+        for: 10s
+        labels:
+          severity: page
+          service: app
+        annotations:
+          summary: Fewer than five healthy instances, which is the minimum that carries the projected peak
+          description: A zone may be down. At the projected peak the surviving instances are above their safe load.
+          runbook_url: docs/runbooks/zone-loss.md
+      - alert: FleetBelowFullStrength
+        expr: envoy_cluster_membership_healthy{envoy_cluster_name="app"} < 8
+        for: 30s
+        labels:
+          severity: ticket
+          service: app
+        annotations:
+          summary: At least one instance is unhealthy; the fleet has lost some of its headroom
+          description: Capacity is still enough for peak while five or more are healthy, but another loss may not be.
+          runbook_url: docs/runbooks/zone-loss.md
+```
+
+```yaml
+# The capacity plan as an alert: five healthy instances carry the projected peak, so fewer than five pages and fewer
+# than eight (any loss of headroom) opens a ticket. Samples step every 2 seconds, like the scrape interval.
+rule_files:
+  - ../alerts/fleet.rules.yml
+
+evaluation_interval: 2s
+
+tests:
+  - name: losing a zone of three leaves five, which is a ticket and not a page
+    interval: 2s
+    input_series:
+      - series: 'envoy_cluster_membership_healthy{envoy_cluster_name="app"}'
+        values: "8x9 5x39 8x30"
+    alert_rule_test:
+      - eval_time: 60s
+        alertname: FleetBelowFullStrength
+        exp_alerts:
+          - exp_labels: {severity: ticket, service: app, envoy_cluster_name: app}
+            exp_annotations:
+              summary: At least one instance is unhealthy; the fleet has lost some of its headroom
+              description: Capacity is still enough for peak while five or more are healthy, but another loss may not be.
+              runbook_url: docs/runbooks/zone-loss.md
+      - {eval_time: 60s, alertname: FleetBelowPeakCapacity, exp_alerts: []}
+      - {eval_time: 140s, alertname: FleetBelowFullStrength, exp_alerts: []}
+```
+
+The first test feeds `envoy_cluster_membership_healthy` as `8x9 5x39 8x30` at a 2-second interval: ten samples of 8, then forty of 5 (a zone of three down), then thirty-one of 8 again. At 60 seconds `FleetBelowFullStrength` must be firing with exactly the given labels and annotations (`for: 30s`), `FleetBelowPeakCapacity` must **not** be (five is enough to carry the peak, which is the whole point of the plan), and at 140 seconds the ticket must have cleared. The expected labels include `envoy_cluster_name: app` because the metric carries it.
+
+### Four healthy instances page
+
+```yaml
+- name: four healthy instances cannot carry the peak and page
+  interval: 2s
+  input_series:
+    - series: 'envoy_cluster_membership_healthy{envoy_cluster_name="app"}'
+      values: "8x9 4x39 8x30"
+  alert_rule_test:
+    - eval_time: 40s
+      alertname: FleetBelowPeakCapacity
+      exp_alerts:
+        - exp_labels: {severity: page, service: app, envoy_cluster_name: app}
+          exp_annotations:
+            summary: Fewer than five healthy instances, which is the minimum that carries the projected peak
+            description: A zone may be down. At the projected peak the surviving instances are above their safe load.
+            runbook_url: docs/runbooks/zone-loss.md
+    - {eval_time: 140s, alertname: FleetBelowPeakCapacity, exp_alerts: []}
+```
+
+With `4x39` the fleet is below the five the plan needs: at 40 seconds `FleetBelowPeakCapacity` must be firing with severity `page`, and it must have cleared by 140 seconds.
+
+### A blip does not page
+
+```yaml
+- name: a one-sample dip does not page
+  interval: 2s
+  input_series:
+    - series: 'envoy_cluster_membership_healthy{envoy_cluster_name="app"}'
+      values: "8x9 3 8x30"
+  alert_rule_test:
+    - {eval_time: 24s, alertname: FleetBelowPeakCapacity, exp_alerts: []}
+```
+
+`8x9 3 8x30` has one sample of 3. Because the rule needs the condition for `for: 10s` (five evaluations), one bad sample never fires: at 24 seconds there is no alert.
+
+### Burn-rate alerts on Envoy's counters
+
+```yaml
+# The SLO burn-rate alerts on the Envoy edge, replayed against the generated production rules. Series step once a minute.
+# The edge carries 1,000 requests per second (60,000 a minute).
+rule_files:
+  - ../generated/rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: healthy traffic fires nothing
+    interval: 1m
+    input_series:
+      - series: 'envoy_http_downstream_rq_xx{envoy_http_conn_manager_prefix="ingress_http",envoy_response_code_class="2"}'
+        values: "0+60000x119"
+      - series: 'envoy_http_downstream_rq_xx{envoy_http_conn_manager_prefix="ingress_http",envoy_response_code_class="5"}'
+        values: "0+0x119"
+    alert_rule_test:
+      - {eval_time: 100m, alertname: ApiAvailabilityFastBurn, exp_alerts: []}
+      - {eval_time: 100m, alertname: ApiAvailabilitySlowBurn, exp_alerts: []}
+
+  # Minutes 60 to 79: half of the edge's responses are 5xx, as when a lost zone's share of traffic is not retried.
+  - name: twenty minutes of half the responses failing pages on the fast burn, then clears
+    interval: 1m
+    input_series:
+      - series: 'envoy_http_downstream_rq_xx{envoy_http_conn_manager_prefix="ingress_http",envoy_response_code_class="2"}'
+        values: "0+60000x59 3570000+30000x19 4200000+60000x39"
+      - series: 'envoy_http_downstream_rq_xx{envoy_http_conn_manager_prefix="ingress_http",envoy_response_code_class="5"}'
+        values: "0+0x59 30000+30000x19 600000+0x39"
+    alert_rule_test:
+      - eval_time: 78m
+        alertname: ApiAvailabilityFastBurn
+        exp_alerts:
+          - exp_labels: {severity: page, slo: api_availability, journey: api}
+            exp_annotations:
+              summary: api_availability burns its error budget at more than 14.4x
+              description: Both the 1h and 5m windows exceed burn rate 14.4 (about 2.1% of the 28-day budget in 1h at that rate) and the 1h window holds at least 10 bad events. Target 99.9%.
+              runbook_url: docs/runbooks/api.md
+      - {eval_time: 118m, alertname: ApiAvailabilityFastBurn, exp_alerts: []}
+
+```
+
+The edge carries 1,000 requests a second (60,000 a minute). The first test is healthy traffic: 2xx rising by 60,000 a minute, 5xx flat at zero, and no burn alert at 100 minutes. The second: for twenty minutes (from about minute 60) the 2xx counter rises by only 30,000 per minute while the 5xx counter rises by 30,000 per minute: half the responses fail. At 78 minutes the fast-burn page must fire; at 118 minutes it must have cleared. The series are Envoy's real metric names, so the test proves the generated rules read the right metrics.
+
+```yaml
+- name: a fifth of requests over the latency threshold for an hour pages the latency SLO
+  interval: 1m
+  input_series:
+    - series: 'envoy_http_downstream_rq_time_count{envoy_http_conn_manager_prefix="ingress_http"}'
+      values: "0+60000x79"
+    - series: 'envoy_http_downstream_rq_time_bucket{envoy_http_conn_manager_prefix="ingress_http",le="50"}'
+      values: "0+60000x19 1200000+48000x59"
+  alert_rule_test:
+    - eval_time: 79m
+      alertname: ApiLatencyFastBurn
+      exp_alerts:
+        - exp_labels: {severity: page, slo: api_latency, journey: api}
+          exp_annotations:
+            summary: api_latency burns its error budget at more than 14.4x
+            description: Both the 1h and 5m windows exceed burn rate 14.4 (about 2.1% of the 28-day budget in 1h at that rate) and the 1h window holds at least 10 bad events. Target 99%.
+            runbook_url: docs/runbooks/api.md
+    - {eval_time: 15m, alertname: ApiLatencyFastBurn, exp_alerts: []}
+```
+
+The latency test uses the `envoy_http_downstream_rq_time_count` and `envoy_http_downstream_rq_time_bucket{le="50"}` series: from minute 20 on, the 50 ms bucket grows by 48,000 of every 60,000 requests, so a fifth of requests are slower than 50 ms; the latency fast-burn page must fire at 79 minutes and must not exist at 15 minutes.
+
+## Try it yourself
+
+1. `make test-rules` prints `SUCCESS` for both test files (a minute or two).
+2. Change `for: 10s` to `for: 0s` in `slo/alerts/fleet.rules.yml` and rerun: the blip test fails because one sample now fires the alert. (Revert.)
+3. Change `values: "8x9 5x39 8x30"` to `"8x9 4x39 8x30"` in the first test: it now fails, because four healthy instances make `FleetBelowPeakCapacity` fire.
+4. `docker run --rm --entrypoint promtool -v $PWD/slo:/slo:ro prom/prometheus:v3.5.0 check rules /slo/alerts/fleet.rules.yml` prints `SUCCESS:` followed by the number of rules found (2).
+5. `.venv/bin/python -m pytest tests/unit/test_evidence.py -q -m measurements` (after `make run`) checks that the number `5` in the alert equals the plan's evidence.
+
+## Mistakes people make
+
+- Expecting `eval_time` to be relative to the wall clock; it is relative to the start of the series.
+- Writing counter `values` that decrease.
+- Testing only the cases that fire, never the ones that must not (five healthy, a blip).
+- Forgetting that `for:` counts evaluations: with a 2-second interval, `for: 10s` is five.
+
+## Check yourself
+
+1. What does `"8x9 5x39 8x30"` mean?
+   *Answer: ten samples of 8, forty of 5, then thirty-one of 8.*
+2. Why must `FleetBelowPeakCapacity` stay quiet with five healthy instances?
+   *Answer: five is the minimum the plan says carries the projected peak.*
+3. Why does a one-sample dip not page?
+   *Answer: the rule requires the condition for ten seconds.*
+4. Why do the burn-rate tests use Envoy's metric names?
+   *Answer: they prove the generated rules read the metrics the edge really exports.*
+5. Why does the test compare annotations?
+   *Answer: so a change of wording or runbook link is noticed.*
+
+## Further reading
+
+- Unit testing for rules: <https://prometheus.io/docs/prometheus/3.5/configuration/unit_testing_rules/>
+- promtool: <https://prometheus.io/docs/prometheus/3.5/command-line/promtool/>
