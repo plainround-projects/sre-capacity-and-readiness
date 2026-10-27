@@ -110,7 +110,7 @@ services:
       app-c2:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9901 && printf 'GET /ready HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q LIVE <&3"]
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9901 && printf 'GET /ready HTTP/1.1\\r\\nHost: lb\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q LIVE <&3"]
       interval: 5s
       timeout: 15s
       retries: 40
@@ -193,6 +193,8 @@ services:
     image: sre-capacity-and-readiness:dev
     profiles: ["tools"]
     entrypoint: ["capacity-loadtest"]
+    # The generator must never be the slow party: give it the largest CPU share so its own lag stays out of the numbers.
+    cpu_shares: 4096
     read_only: true
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
