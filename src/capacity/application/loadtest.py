@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from capacity.application.ports import CpuProbe, OpenLoopRunner
 from capacity.domain.errors import NoKneeError
-from capacity.domain.knee import Knee, StepResult, find_knee, safe_load
+from capacity.domain.knee import BASELINE_STEPS, Knee, StepResult, baseline_p99, find_knee, looks_broken, safe_load
 from capacity.domain.latency import Sample, summarize, window_p99s
 
 GENERATOR_LAG_LIMIT_MS = 5.0
@@ -52,6 +52,7 @@ def _step_dict(step: StepResult) -> dict[str, Any]:
         "p50_ms": step.p50_ms,
         "p99_ms": step.p99_ms,
         "max_ms": step.max_ms,
+        "attempts": step.attempts,
         "cpu_utilization": step.cpu_utilization,
     }
 
@@ -75,7 +76,10 @@ async def knee_test(
         samples, lag = await runner.run(rps, step_seconds)
         after = await probe.cpu_seconds() if probe else None
         utilization = None if before is None or after is None else (after - before) / step_seconds
-        results.append(summarize(samples, rps, step_seconds, utilization))
+        step = summarize(samples, rps, step_seconds, utilization)
+        if len(results) >= BASELINE_STEPS and looks_broken(step, baseline_p99(results)):
+            step = await _retry(runner, probe, step, rps, step_seconds)
+        results.append(step)
         worst_lag = max(worst_lag, lag)
         found = _knee_so_far(results)
         if found is not None and sum(1 for step in results if step.target_rps > found.knee_rps) >= 2:
@@ -85,6 +89,23 @@ async def knee_test(
     except NoKneeError:
         return KneeReport(tuple(results), None, None, margin, worst_lag)
     return KneeReport(tuple(results), knee, safe_load(knee, margin), margin, worst_lag)
+
+
+async def _retry(
+    runner: OpenLoopRunner, probe: CpuProbe | None, first: StepResult, rps: float, step_seconds: float
+) -> StepResult:
+    """Run a suspicious step once more and keep the better of the two.
+
+    A real knee is there on the second try as well; a stall on a shared machine (a neighbor, a garbage collection, a
+    descheduled generator) is not. The kept result says it took two attempts.
+    """
+    before = await probe.cpu_seconds() if probe else None
+    samples, _ = await runner.run(rps, step_seconds)
+    after = await probe.cpu_seconds() if probe else None
+    utilization = None if before is None or after is None else (after - before) / step_seconds
+    second = summarize(samples, rps, step_seconds, utilization)
+    best = first if first.p99_ms <= second.p99_ms else second
+    return replace(best, attempts=2)
 
 
 def _knee_so_far(results: list[StepResult]) -> Knee | None:

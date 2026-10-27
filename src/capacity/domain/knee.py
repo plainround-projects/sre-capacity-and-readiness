@@ -25,6 +25,7 @@ class StepResult:
     p99_ms: float
     cpu_utilization: float | None = None
     max_ms: float = 0.0
+    attempts: int = 1
 
     @property
     def error_rate(self) -> float:
@@ -50,6 +51,16 @@ class Knee:
         return "unknown: throughput stopped rising but no resource was measured at its limit"
 
 
+def looks_broken(step: StepResult, baseline_p99_ms: float, rise_factor: float = RISE_FACTOR) -> bool:
+    """True when the step's p99 is more than `rise_factor` times the flat baseline, or it fails over 1% of requests."""
+    return step.p99_ms > rise_factor * baseline_p99_ms or step.error_rate > 0.01
+
+
+def baseline_p99(steps: list[StepResult]) -> float:
+    """The median p99 of the first three steps: what \"flat\" looks like on this machine."""
+    return float(median(step.p99_ms for step in steps[:BASELINE_STEPS]))
+
+
 def find_knee(steps: list[StepResult], rise_factor: float = RISE_FACTOR) -> Knee:
     """The first step whose p99 exceeds `rise_factor` times the flat baseline, or that fails more than 1% of requests,
     and stays that bad on the next step (a spike that goes away again is noise, not a knee).
@@ -60,10 +71,10 @@ def find_knee(steps: list[StepResult], rise_factor: float = RISE_FACTOR) -> Knee
     if len(steps) <= BASELINE_STEPS:
         raise NoKneeError(f"need more than {BASELINE_STEPS} steps to see a flat part and a knee")
     ordered = sorted(steps, key=lambda step: step.target_rps)
-    baseline = median(step.p99_ms for step in ordered[:BASELINE_STEPS])
+    baseline = baseline_p99(ordered)
 
     def broken(step: StepResult) -> bool:
-        return step.p99_ms > rise_factor * baseline or step.error_rate > 0.01
+        return looks_broken(step, baseline, rise_factor)
 
     for index in range(BASELINE_STEPS, len(ordered)):
         persists = index + 1 == len(ordered) or broken(ordered[index + 1])

@@ -72,7 +72,7 @@ class TestKneeTest:
     async def test_it_stops_two_steps_past_the_knee_instead_of_driving_the_instance_into_the_ground(self):
         runner = FakeRunner()
         await knee_test(runner, None, [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000], step_seconds=1)
-        assert runner.calls == [100, 200, 300, 400, 500, 600, 700]
+        assert runner.calls == [100, 200, 300, 400, 500, 500, 600, 600, 700, 700]  # each suspicious step runs twice
 
     async def test_a_service_that_never_saturates_reports_no_knee_instead_of_inventing_one(self):
         report = await knee_test(FakeRunner(knee=10_000), None, [100, 200, 300, 400, 500], step_seconds=1)
@@ -122,3 +122,36 @@ class TestPoolHelpers:
 
     def test_no_size_that_held_means_no_choice(self):
         assert choose_pool_size([{"pool_size": 20, "within_slo": False}]) is None
+
+
+class TestSuspiciousStepsAreRetried:
+    async def test_a_stall_that_does_not_repeat_is_not_a_knee(self):
+        class StallsOnce(FakeRunner):
+            def __init__(self):
+                super().__init__(knee=10_000)
+                self.stalled = False
+
+            async def run(self, rps, duration_s):
+                samples, lag = await super().run(rps, duration_s)
+                if rps == 400 and not self.stalled:
+                    self.stalled = True
+                    return [Sample(s.scheduled_s, 1.5, True) for s in samples], lag
+                return samples, lag
+
+        report = await knee_test(StallsOnce(), None, [100, 200, 300, 400, 500, 600], step_seconds=1)
+        assert report.knee is None
+        step_400 = next(step for step in report.steps if step.target_rps == 400)
+        assert step_400.attempts == 2
+        assert step_400.p99_ms < 50
+
+    async def test_a_real_knee_is_there_on_the_second_try_too(self):
+        runner = FakeRunner(knee=500)
+        report = await knee_test(runner, None, [100, 200, 300, 400, 500, 600, 700, 800], step_seconds=1)
+        assert report.knee is not None
+        assert report.knee.knee_rps == 500
+        assert runner.calls.count(500) == 2
+
+    async def test_healthy_steps_run_once(self):
+        runner = FakeRunner(knee=10_000)
+        await knee_test(runner, None, [100, 200, 300, 400, 500], step_seconds=1)
+        assert runner.calls == [100, 200, 300, 400, 500]
