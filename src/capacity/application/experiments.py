@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from typing import Any
 
 POOL_HEADROOM = 1.25
 POOL_STEP = 5
+ZONES = ("a", "b", "c")
+COMPOSE_FLEET = 9  # instances docker-compose.yml defines: three in each zone
 
 
 def naive_pool_size(peak_rps: float, hold_ms: float) -> int:
@@ -29,3 +32,18 @@ def choose_pool_size(results: list[dict[str, Any]]) -> int | None:
     if not holding:
         return None
     return math.ceil(holding[0] * POOL_HEADROOM / POOL_STEP) * POOL_STEP
+
+
+def fleet_instances(distribution: Sequence[int]) -> list[str]:
+    """The service names of a fleet spread as `distribution` says over zones a, b and c, such as (3, 3, 2)."""
+    return [
+        f"app-{zone}{number}"
+        for zone, count in zip(ZONES, distribution, strict=False)
+        for number in range(1, count + 1)
+    ]
+
+
+def spare_instances(distribution: Sequence[int]) -> list[str]:
+    """The instances compose defines that the plan does not run."""
+    wanted = set(fleet_instances(distribution))
+    return [name for name in fleet_instances((COMPOSE_FLEET // len(ZONES),) * len(ZONES)) if name not in wanted]

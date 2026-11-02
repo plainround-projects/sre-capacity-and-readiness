@@ -10,6 +10,7 @@ from capacity.domain.errors import InvalidPlanError, NoKneeError
 
 BASELINE_STEPS = 3
 RISE_FACTOR = 3.0
+BASELINE_FLOOR_MS = 15.0  # a few milliseconds of jitter is the host's, not the service's: a rise must clear 3x this
 STEP_ROUNDING = 25
 
 
@@ -52,8 +53,12 @@ class Knee:
 
 
 def looks_broken(step: StepResult, baseline_p99_ms: float, rise_factor: float = RISE_FACTOR) -> bool:
-    """True when the step's p99 is more than `rise_factor` times the flat baseline, or it fails over 1% of requests."""
-    return step.p99_ms > rise_factor * baseline_p99_ms or step.error_rate > 0.01
+    """True when the step's p99 is more than `rise_factor` times the flat baseline, or it fails over 1% of requests.
+
+    The baseline counts as at least `BASELINE_FLOOR_MS`: on a shared host a 5 ms baseline is timer and scheduler noise,
+    and tripling noise is not a knee.
+    """
+    return step.p99_ms > rise_factor * max(baseline_p99_ms, BASELINE_FLOOR_MS) or step.error_rate > 0.01
 
 
 def baseline_p99(steps: list[StepResult]) -> float:

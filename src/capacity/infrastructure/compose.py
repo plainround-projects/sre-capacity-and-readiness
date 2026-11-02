@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 import urllib.error
@@ -15,7 +16,10 @@ from typing import Any
 _ATTEMPTS = 3
 _RETRY_PAUSE_SECONDS = 2.0
 _TRANSIENT = ("Bad Gateway", "request returned", "connection reset", "EOF", "i/o timeout")
-HEALTHY_MEMBERS_URL = "http://localhost:47281/stats?filter=cluster.app.membership_healthy"
+CLUSTERS_URL = "http://localhost:47281/clusters"
+# One line per host: `app::192.168.32.5:8080::health_flags::healthy`. A host Envoy has dropped from DNS but still
+# remembers shows `/pending_dynamic_removal` instead, so it does not match.
+_HEALTHY_HOST = re.compile(r"^app::\S+::health_flags::healthy$", re.MULTILINE)
 
 
 class ComposeError(RuntimeError):
@@ -96,11 +100,11 @@ class Compose:
 
 
 def healthy_members() -> int:
-    """Healthy instances according to the load balancer, or 0 when it cannot be reached."""
+    """Hosts the load balancer lists as healthy and not pending removal, or 0 when it cannot be reached."""
     try:
-        with urllib.request.urlopen(HEALTHY_MEMBERS_URL, timeout=3) as response:
-            return int(response.read().decode().strip().rsplit(":", 1)[1])
-    except (urllib.error.URLError, TimeoutError, ValueError, IndexError):
+        with urllib.request.urlopen(CLUSTERS_URL, timeout=3) as response:
+            return len(_HEALTHY_HOST.findall(response.read().decode()))
+    except (urllib.error.URLError, TimeoutError, ValueError):
         return 0
 
 

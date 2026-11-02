@@ -11,6 +11,7 @@ from capacity.domain.knee import BASELINE_STEPS, Knee, StepResult, baseline_p99,
 from capacity.domain.latency import Sample, summarize, window_p99s
 
 GENERATOR_LAG_LIMIT_MS = 5.0
+SATURATED_CPU = 0.9  # a core this busy is saturated; a run that spiked with the core idler than this was disturbed
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +23,22 @@ class KneeReport:
     safe_rps: int | None
     margin: float
     generator_lag_p99_ms: float
+
+    @property
+    def problem(self) -> str | None:
+        """Why these numbers cannot be trusted, or None. An untrustworthy knee is never saved as evidence."""
+        if self.generator_lag_p99_ms > GENERATOR_LAG_LIMIT_MS:
+            return f"the load generator itself was late by {self.generator_lag_p99_ms:.1f} ms at p99"
+        if self.knee is None:
+            return "the load never reached a knee"
+        if self.knee.saturated_resource != "cpu":
+            used = self.knee.cpu_utilization_at_knee
+            share = "an unmeasured share" if used is None else f"{used * 100:.0f}%"
+            return (
+                f"p99 rose at {self.knee.knee_rps:g} rps with {share} of the core in use, so the host, not the "
+                "instance, ran short of something"
+            )
+        return None
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready, with the resource named."""
@@ -132,6 +149,24 @@ class RunReport:
         """True when no error occurred and no window's p99 exceeded the SLO."""
         return self.result.errors == 0 and all(p99 <= self.slo_p99_ms for p99 in self.window_p99_ms)
 
+    @property
+    def spiked(self) -> bool:
+        """True when a window left the SLO although no request failed: saturation, or a disturbed machine."""
+        return self.result.errors == 0 and not self.within_slo
+
+    @property
+    def problem(self) -> str | None:
+        """Why these numbers cannot be trusted, or None. An untrustworthy run is never saved as evidence."""
+        if self.generator_lag_p99_ms > GENERATOR_LAG_LIMIT_MS:
+            return f"the load generator itself was late by {self.generator_lag_p99_ms:.1f} ms at p99"
+        used = self.result.cpu_utilization
+        if self.spiked and used is not None and used < SATURATED_CPU:
+            return (
+                f"a window's p99 left the SLO with no errors while the instance used only {used * 100:.0f}% of its "
+                "core, so the host, not the instance, was the cause"
+            )
+        return None
+
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready."""
         return {
@@ -147,16 +182,50 @@ class RunReport:
 
 
 async def timed_run(
-    runner: OpenLoopRunner, label: str, rps: float, seconds: float, slo_p99_ms: float, window_s: float = 10.0
+    runner: OpenLoopRunner,
+    label: str,
+    rps: float,
+    seconds: float,
+    slo_p99_ms: float,
+    window_s: float = 10.0,
+    probe: CpuProbe | None = None,
+    attempts: int = 1,
 ) -> RunReport:
-    """Run at `rps` for `seconds` and report overall and per-window p99, so slow drift cannot hide in an average."""
-    samples, lag = await runner.run(rps, seconds)
-    return _report(label, rps, seconds, slo_p99_ms, window_s, samples, lag)
+    """Run at `rps` for `seconds` and report overall and per-window p99, so slow drift cannot hide in an average.
+
+    A run that spiked with no failed request (or with a late generator) is run again, up to `attempts` times, and the
+    last one is reported: a real shortage is there every time, a stall on a shared machine is not.
+    """
+    report: RunReport | None = None
+    for attempt in range(1, attempts + 1):
+        before = await probe.cpu_seconds() if probe else None
+        samples, lag = await runner.run(rps, seconds)
+        after = await probe.cpu_seconds() if probe else None
+        utilization = None if before is None or after is None else (after - before) / seconds
+        report = _report(label, rps, seconds, slo_p99_ms, window_s, samples, lag, utilization)
+        report = replace(report, result=replace(report.result, attempts=attempt))
+        if lag <= GENERATOR_LAG_LIMIT_MS and not report.spiked:
+            break
+    assert report is not None
+    return report
 
 
 def _report(
-    label: str, rps: float, seconds: float, slo: float, window_s: float, samples: list[Sample], lag: float
+    label: str,
+    rps: float,
+    seconds: float,
+    slo: float,
+    window_s: float,
+    samples: list[Sample],
+    lag: float,
+    utilization: float | None,
 ) -> RunReport:
     return RunReport(
-        label, rps, seconds, summarize(samples, rps, seconds), tuple(window_p99s(samples, window_s)), slo, lag
+        label,
+        rps,
+        seconds,
+        summarize(samples, rps, seconds, utilization),
+        tuple(window_p99s(samples, window_s)),
+        slo,
+        lag,
     )

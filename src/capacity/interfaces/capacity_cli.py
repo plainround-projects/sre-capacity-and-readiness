@@ -9,16 +9,17 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from capacity.application import capacity_report, launch_decision
+from capacity.application.experiments import COMPOSE_FLEET
 from capacity.application.readiness import Reviewer
 from capacity.domain.plan import plan_capacity
 from capacity.infrastructure.logging_setup import configure_logging
 from capacity.infrastructure.project_files import FileSystemProject, JsonEvidence, SloFilesCatalog, YamlChecklist
+from capacity.infrastructure.slo_files import render_fleet_files
 
 _MEASURED = re.compile(r"<!-- measured -->.*?<!-- /measured -->", re.DOTALL)
 PEAK_RPS = 1000.0
 GROWTH = 2.0
 ZONES = 3
-COMPOSE_FLEET = 8  # instances defined in docker-compose.yml (3/3/2 over three zones)
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
@@ -52,6 +53,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
         },
     )
     print(f"verified by running {plan.surviving_after_zone_loss} instances at {plan.future_peak_rps:g} rps: {verified}")
+    for path, text in render_fleet_files(
+        plan.instances_for_peak, plan.total_instances, plan.surviving_after_zone_loss
+    ).items():
+        (Path(args.root) / path).write_text(text, encoding="utf-8")
+    print("wrote the fleet alert thresholds: page below", plan.instances_for_peak, "ticket below", plan.total_instances)
     if plan.total_instances > COMPOSE_FLEET:
         print(
             f"the plan needs {plan.total_instances} instances but docker-compose.yml defines {COMPOSE_FLEET}: add "
@@ -101,6 +107,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     plan = sub.add_parser("plan", help="size the fleet from the measured safe load")
     plan.add_argument("--evidence", default="docs/evidence")
+    plan.add_argument("--root", default=".", help="the repository, where the fleet alert files are written")
     plan.add_argument("--peak", type=float, default=PEAK_RPS, help="today's peak requests per second")
     plan.add_argument("--growth", type=float, default=GROWTH, help="growth factor over six months")
     plan.add_argument("--safe-rps", type=float, default=0.0, help="override the measured safe load per instance")

@@ -13,7 +13,7 @@ export STEP_SECONDS ?= 10
 export SOAK_SECONDS ?= 120
 CHECK_SECONDS ?= 40
 
-.PHONY: help install up reset-fleet run knee soak plan plan-doc full-fleet zone-loss pool-sweep dependency-test rollout-test restore-test review test-measurements \
+.PHONY: help install preflight clean-evidence set-fleet up reset-fleet run knee soak plan plan-doc full-fleet zone-loss pool-sweep dependency-test rollout-test restore-test review test-measurements \
         psql rules rules-check lint format test test-unit test-rules test-integration test-e2e audit check lock docker-build down clean
 
 help: ## list the targets
@@ -31,21 +31,34 @@ up: $(STAMP) ## build and start the fleet: 8 instances in 3 zones, Envoy, the le
 	docker compose up -d --build --wait
 	@echo "edge http://localhost:$${EDGE_PORT:-47280}/work   Envoy admin http://localhost:$${ENVOY_ADMIN_PORT:-47281}   Prometheus http://localhost:$${PROMETHEUS_PORT:-47290}"
 
+preflight: $(STAMP) ## refuse to measure when the machine is busy (one-minute load per CPU above 0.6, or MAX_LOAD)
+	$(EXPERIMENTS) preflight
+
+clean-evidence: ## remove the load-dependent evidence, so a run never mixes old and new measurements
+	rm -f $(EVIDENCE)/*.json
+
+set-fleet: $(STAMP) ## run exactly the instances the plan says and stop the spares
+	$(EXPERIMENTS) set-fleet
+
 reset-fleet: ## recreate every instance without the shared dependency, at version v1
-	LEDGER_URL= APP_VERSION=v1 docker compose up -d --no-deps --force-recreate --wait app-a1 app-a2 app-a3 app-b1 app-b2 app-b3 app-c1 app-c2
+	LEDGER_URL= APP_VERSION=v1 docker compose up -d --no-deps --force-recreate --wait app-a1 app-a2 app-a3 app-b1 app-b2 app-b3 app-c1 app-c2 app-c3
 
 # The whole story, in the lesson's order: the knee, the safe load, the plan, the fleet and its lost zone, the next
 # bottleneck, the failures the review needs evidence for, and the review.
-run: up reset-fleet knee soak plan full-fleet zone-loss pool-sweep dependency-test rollout-test restore-test plan-doc review test-measurements ## the whole capacity and readiness exercise (about 20 minutes on a quiet machine)
+run: preflight clean-evidence up reset-fleet knee soak plan set-fleet full-fleet zone-loss pool-sweep dependency-test rollout-test restore-test plan-doc review test-measurements ## the whole capacity and readiness exercise (about 20 minutes on a quiet machine)
 
 knee: $(STAMP) ## step the load up on one instance until p99 climbs; names the saturated resource (STEP_SECONDS per step)
 	mkdir -p $(EVIDENCE)
-	$(LOADTEST) knee --target http://app-a1:8080 --ops http://app-a1:9101 --step-seconds $(STEP_SECONDS) > $(EVIDENCE)/knee.json
+	$(LOADTEST) knee --target http://app-a1:8080 --ops http://app-a1:9101 --step-seconds $(STEP_SECONDS) > $(EVIDENCE)/knee.json.tmp \
+	  || { rm -f $(EVIDENCE)/knee.json.tmp; exit 1; }
+	mv $(EVIDENCE)/knee.json.tmp $(EVIDENCE)/knee.json
 	@$(PY) -c "import json; d=json.load(open('$(EVIDENCE)/knee.json')); print(json.dumps({k: d[k] for k in ('knee','safe_rps','margin_below_knee')}, indent=2)); [print(s) for s in d['steps']]"
 
 soak: $(STAMP) ## hold one instance at the safe load for SOAK_SECONDS and check p99 in every window
 	$(LOADTEST) soak --target http://app-a1:8080 --rps $$($(PY) -c "import json; print(json.load(open('$(EVIDENCE)/knee.json'))['safe_rps'])") \
-	  --seconds $(SOAK_SECONDS) --label soak > $(EVIDENCE)/soak.json
+	  --seconds $(SOAK_SECONDS) --label soak --ops http://app-a1:9101 > $(EVIDENCE)/soak.json.tmp \
+	  || { rm -f $(EVIDENCE)/soak.json.tmp; exit 1; }
+	mv $(EVIDENCE)/soak.json.tmp $(EVIDENCE)/soak.json
 	@cat $(EVIDENCE)/soak.json
 
 plan: $(STAMP) ## size the fleet from the measured safe load: the formula, the inputs, the result

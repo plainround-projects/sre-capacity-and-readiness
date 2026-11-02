@@ -1,4 +1,4 @@
-# The fleet: 8 instances in 3 zones (3/3/2) behind an Envoy load balancer, a shared ledger with a bounded pool, and
+# The fleet: up to 9 instances in 3 zones (3/3/3), of which the capacity plan says how many run, behind an Envoy load balancer, a shared ledger with a bounded pool, and
 # PostgreSQL behind it. Every instance is a container with a fixed 1.0 CPU and 256 MiB limit, so one instance's
 # capacity is a stable number. Prometheus scrapes Envoy (the edge) and every instance.
 name: sre-capacity-and-readiness
@@ -23,7 +23,7 @@ x-instance: &instance
     start_period: 10s
 
 x-instance-env: &instance-env
-  WORK_ROUNDS: ${WORK_ROUNDS:-3000}
+  WORK_ROUNDS: ${WORK_ROUNDS:-6000}
   # Empty means no shared dependency: the first tests find the CPU knee on its own. `make run` sets it for the pool tests.
   LEDGER_URL: ${LEDGER_URL:-}
   LEDGER_TIMEOUT_S: ${LEDGER_TIMEOUT_S:-0.5}
@@ -82,6 +82,12 @@ services:
       <<: *instance-env
       ZONE: c
       INSTANCE: c2
+  app-c3:
+    <<: *instance
+    environment:
+      <<: *instance-env
+      ZONE: c
+      INSTANCE: c3
 
   lb:
     image: envoyproxy/envoy:v1.32.3
@@ -108,6 +114,8 @@ services:
       app-c1:
         condition: service_healthy
       app-c2:
+        condition: service_healthy
+      app-c3:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9901 && printf 'GET /ready HTTP/1.1\\r\\nHost: lb\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q LIVE <&3"]

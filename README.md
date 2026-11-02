@@ -103,7 +103,7 @@ A load test is only as honest as its generator. `capacity-loadtest` is open-loop
 Only what the lesson scopes out, plus where this build differs from the lesson's text:
 
 - The three "zones" are labels on containers of one Docker host, so the zone-loss test models the capacity effect of a zone failure but not a shared network or power failure. This is recorded as an accepted risk in the review.
-- The default request cost is 3,000 rounds of SHA-256 (about a millisecond), half the lesson's, so that the projected-peak fleet test fits on a laptop ([ADR 0003](docs/adr/0003-one-core-per-instance-and-cpu-work-on-the-event-loop.md)). `WORK_ROUNDS=6000` restores the lesson's; all plan numbers come from measuring.
+- The compose default request cost is 6,000 rounds of SHA-256 (about two milliseconds), the lesson's, so that one instance saturates its core near 500 requests a second and the knee stands well clear of timer and scheduler jitter ([ADR 0003](docs/adr/0003-one-core-per-instance-and-cpu-work-on-the-event-loop.md)). The program's own default is 3,000; `WORK_ROUNDS` sets it. All plan numbers come from measuring.
 - Steps last 10 seconds and the soak 120, not 2 minutes and 30 minutes. Set `STEP_SECONDS=120 SOAK_SECONDS=1800` for the real thing.
 - The shared dependency is a small ledger service with a bounded pool of real PostgreSQL connections; `HOLD_MS=10` makes each request hold its connection for 10 ms, the lesson's average hold time.
 - The dashboard is a Grafana-format JSON in the repository, not a Grafana container; the review checks that every query uses a metric the system exports, and the end-to-end test checks that those metrics really are exported.

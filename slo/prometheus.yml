@@ -19,7 +19,7 @@ scrape_configs:
         labels: {zone: a}
       - targets: ["app-b1:9101", "app-b2:9101", "app-b3:9101"]
         labels: {zone: b}
-      - targets: ["app-c1:9101", "app-c2:9101"]
+      - targets: ["app-c1:9101", "app-c2:9101", "app-c3:9101"]
         labels: {zone: c}
   - job_name: ledger
     static_configs:

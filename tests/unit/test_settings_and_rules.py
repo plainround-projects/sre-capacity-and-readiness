@@ -1,10 +1,12 @@
 import pytest
+import yaml
 
 from capacity.application import rules
+from capacity.application.experiments import fleet_instances, spare_instances
 from capacity.domain.cpu import cpu_work
 from capacity.domain.latency import Sample
 from capacity.infrastructure.settings import InstanceSettings, LedgerSettings, SettingsError
-from capacity.infrastructure.slo_files import render_rule_files
+from capacity.infrastructure.slo_files import render_fleet_files, render_rule_files
 
 
 class TestSettings:
@@ -70,3 +72,18 @@ class TestRules:
 
 def test_sample_is_a_plain_value_object():
     assert Sample(1.0, 0.01, True) == Sample(1.0, 0.01, True)
+
+
+class TestFleetFiles:
+    def test_the_alert_thresholds_and_the_replay_follow_the_plan(self):
+        files = {path.name: text for path, text in render_fleet_files(3, 5, 3).items()}
+        rules = yaml.safe_load(files["fleet.rules.yml"])["groups"][0]["rules"]
+        assert [rule["expr"].rsplit("< ", 1)[1] for rule in rules] == ["3", "5"]
+        replay = yaml.safe_load(files["fleet.test.yml"])
+        assert replay["tests"][0]["input_series"][0]["values"] == "5x9 3x39 5x30"
+        assert replay["tests"][1]["input_series"][0]["values"] == "5x9 2x39 5x30"
+
+    def test_the_spares_are_the_instances_compose_defines_and_the_plan_does_not_run(self):
+        assert fleet_instances((3, 3, 2))[-1] == "app-c2"
+        assert spare_instances((3, 3, 2)) == ["app-c3"]
+        assert len(spare_instances((2, 2, 1))) == 4

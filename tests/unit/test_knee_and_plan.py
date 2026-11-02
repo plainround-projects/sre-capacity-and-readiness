@@ -119,3 +119,16 @@ class TestPlan:
     def test_one_zone_cannot_survive_losing_itself(self):
         with pytest.raises(InvalidPlanError):
             plan_capacity(1000, 2, 400, zones=1)
+
+
+class TestJitterIsNotAKnee:
+    def test_a_few_milliseconds_of_jitter_on_a_tiny_baseline_is_not_a_rise(self):
+        gentle = [
+            step(rps, p99) for rps, p99 in ((100, 4.0), (200, 4.5), (300, 5.0), (400, 12.0), (500, 19.0), (600, 28.0))
+        ]
+        with pytest.raises(NoKneeError):
+            find_knee(gentle)
+
+    def test_a_rise_that_clears_three_times_the_floor_is_still_a_knee(self):
+        steps = [step(rps, p99) for rps, p99 in ((100, 4.0), (200, 4.5), (300, 5.0), (400, 60.0), (500, 300.0))]
+        assert find_knee(steps).knee_rps == 400

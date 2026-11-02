@@ -58,8 +58,8 @@ def test_step_four_the_next_bottleneck_is_the_shared_pool_and_the_plan_names_it_
 
 
 def test_a_rolling_restart_and_a_rollback_under_load_cost_no_request(evidence):
-    rollout = evidence("rollout")
-    assert rollout["restarted"] == 16
+    rollout, plan = evidence("rollout"), evidence("plan")
+    assert rollout["restarted"] == 2 * plan["total_instances"], "every instance restarted twice: to v2, then back to v1"
     assert rollout["errors"] == 0
     assert rollout["within_slo"] is True
     assert rollout["rollback_ok"] is True

@@ -85,16 +85,21 @@ class TestComposeRetries:
 
 
 class TestCompose:
-    async def test_healthy_members_reads_envoys_stats_line(self, monkeypatch):
-        async def stats(_):
-            return web.Response(text="cluster.app.membership_healthy: 5\n")
+    async def test_healthy_members_counts_hosts_that_are_healthy_and_not_pending_removal(self, monkeypatch):
+        async def clusters(_):
+            lines = [f"app::10.0.0.{n}:8080::health_flags::healthy" for n in range(1, 6)]
+            lines += [
+                "app::10.0.0.9:8080::health_flags::/pending_dynamic_removal"
+            ]  # dropped from DNS, still remembered
+            lines += ["app::10.0.0.8:8080::health_flags::/failed_active_hc"]
+            return web.Response(text="\n".join(lines) + "\n")
 
         app = web.Application()
-        app.router.add_get("/stats", stats)
+        app.router.add_get("/clusters", clusters)
         server = TestServer(app)
         await server.start_server()
         try:
-            monkeypatch.setattr(compose, "HEALTHY_MEMBERS_URL", f"http://127.0.0.1:{server.port}/stats")
+            monkeypatch.setattr(compose, "CLUSTERS_URL", f"http://127.0.0.1:{server.port}/clusters")
             assert await asyncio.to_thread(compose.healthy_members) == 5
             await asyncio.to_thread(compose.wait_for_members, 5, 2.0)
             with pytest.raises(TimeoutError):
@@ -103,7 +108,7 @@ class TestCompose:
             await server.close()
 
     def test_an_unreachable_balancer_counts_as_zero_healthy(self, monkeypatch):
-        monkeypatch.setattr(compose, "HEALTHY_MEMBERS_URL", "http://127.0.0.1:9/stats")
+        monkeypatch.setattr(compose, "CLUSTERS_URL", "http://127.0.0.1:9/clusters")
         assert compose.healthy_members() == 0
 
     async def test_versions_seen_reads_the_version_header(self):
@@ -146,12 +151,11 @@ async def test_the_load_test_cli_runs_a_fleet_report_against_a_real_instance(cap
         assert (report["experiment"], report["label"], report["requests"], report["errors"]) == ("fleet", "t", 100, 0)
         knee_argv = [
             "knee", "--target", f"http://127.0.0.1:{server.port}", "--ops", f"http://127.0.0.1:{ops.port}",
-            "--steps", "10,20,30,40", "--step-seconds", "0.5",
+            "--steps", "10,20,30,40", "--step-seconds", "0.5", "--attempts", "1",
         ]  # fmt: skip
-        await asyncio.to_thread(loadtest_cli.main, knee_argv)
-        knee = json.loads(capsys.readouterr().out)
-        assert knee["experiment"] == "knee"
-        assert len(knee["steps"]) == 4
+        with pytest.raises(SystemExit, match="not a valid measurement, nothing written"):
+            await asyncio.to_thread(loadtest_cli.main, knee_argv)
+        assert capsys.readouterr().out == ""  # a load that never reached a knee leaves nothing to save as evidence
     finally:
         await server.close()
         await ops.close()
@@ -173,18 +177,21 @@ class TestCapacityCli:
 
     def test_the_plan_command_sizes_the_fleet_from_the_measured_safe_load_and_saves_it(self, tmp_path, root, capsys):
         project = self.project(tmp_path, root, {"knee": {"safe_rps": 400}, "fleet-zone-loss": {"within_slo": True}})
-        assert self.run(["plan", "--evidence", str(project / "docs" / "evidence")]) == 0
+        assert self.run(["plan", "--evidence", str(project / "docs" / "evidence"), "--root", str(project)]) == 0
         plan = JsonEvidence(project / "docs" / "evidence").load("plan")
         assert plan is not None
         assert (plan["instances_for_peak"], plan["total_instances"], plan["verified_by_lost_zone_run"]) == (5, 8, True)
         assert "ceil(2000 / 400) = 5" in capsys.readouterr().out
+        rules = (project / "slo" / "alerts" / "fleet.rules.yml").read_text()
+        assert "< 5" in rules
+        assert "< 8" in rules
 
     def test_the_plan_command_fails_when_the_plan_needs_more_instances_than_the_compose_file_defines(
         self, tmp_path, root, capsys
     ):
-        project = self.project(tmp_path, root, {"knee": {"safe_rps": 300}})
-        assert self.run(["plan", "--evidence", str(project / "docs" / "evidence")]) == 1
-        assert "docker-compose.yml defines 8" in capsys.readouterr().err
+        project = self.project(tmp_path, root, {"knee": {"safe_rps": 200}})
+        assert self.run(["plan", "--evidence", str(project / "docs" / "evidence"), "--root", str(project)]) == 1
+        assert "docker-compose.yml defines 9" in capsys.readouterr().err
 
     def test_the_plan_command_refuses_to_guess_without_a_measurement(self, tmp_path):
         with pytest.raises(SystemExit, match="no safe load"):
@@ -217,3 +224,22 @@ class TestCapacityCli:
             with pytest.raises(SystemExit) as exit_info:
                 slo_cli.main(argv)
             assert exit_info.value.code == expected
+
+
+class TestPreflight:
+    def test_a_busy_machine_is_refused_before_anything_is_measured(self, monkeypatch):
+        from capacity.interfaces import experiments_cli
+
+        monkeypatch.delenv("MAX_LOAD", raising=False)
+        monkeypatch.setattr("os.getloadavg", lambda: (99.0, 50.0, 20.0))
+        with pytest.raises(SystemExit, match="the machine is busy"):
+            experiments_cli.preflight()
+
+    def test_a_quiet_machine_passes_and_the_limit_can_be_raised(self, monkeypatch):
+        from capacity.interfaces import experiments_cli
+
+        monkeypatch.setattr("os.getloadavg", lambda: (0.5, 0.5, 0.5))
+        assert experiments_cli.preflight()["load_1min"] == 0.5
+        monkeypatch.setattr("os.getloadavg", lambda: (99.0, 50.0, 20.0))
+        monkeypatch.setenv("MAX_LOAD", "100")
+        assert experiments_cli.preflight()["load_1min"] == 99.0
