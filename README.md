@@ -59,6 +59,18 @@ restore:    28,467 rows backed up (332,518 bytes, 2.0 s), restored into a scratc
 
 The knee, soak, plan, fleet and pool-sweep experiments need roughly four free cores for about 20 minutes. The machine this repository was built on was running dozens of other containers at a load average above 200 during the whole build window (open-loop generator lag of up to 145 seconds, soak p99 of 6 seconds at 300 requests a second), so every attempt produced numbers that described the machine, not the service, and none was committed. `docs/capacity-plan.md` and `docs/launch-decision.md` are generated from that evidence and are therefore not in the repository either: `make run` writes them. Until it has been run, `make review` reports exactly that (restore verified, the load evidence missing) rather than a launch decision (today it says DON'T LAUNCH YET: rollout and capacity have no evidence, backup and restore pass), and `make test-measurements` fails with a missing-evidence message until `make run` has been run; it is not part of `make test`.
 
+**Verification run of 2026-11-02 (shared machine, load average 9 to 30 from other work).** `make up` built and started the stack (12 containers healthy). `make test` passed (173 tests) and the promtool replays passed. `make test-e2e` passed 4 of 5; the failing one, `test_the_load_balancer_sees_eight_healthy_instances`, saw 15 healthy members. Two attempts at `make run` reached the soak and stopped there:
+
+```text
+knee:  500 rps (p99 4.4 ms -> 17.6 ms), CPU of the one core only 49.5% at the knee, so the resource is reported as unknown, not CPU
+soak:  375 rps for 120 s, 0 errors, but window p99 up to 174 ms (and 884 ms in the first attempt): not within the 50 ms SLO
+plan:  ceil(2000 / 375) = 6 for the peak, 9 in all, but docker-compose.yml defines 8, so `make plan` stops and asks for more instances
+```
+
+These numbers describe a loaded Docker VM, not the service: the instance never used a full core before latency rose, and the generator's other steps were noisy. They were not committed (`docs/evidence` holds only the dependency and restore evidence), and `docs/capacity-plan.md` and `docs/launch-decision.md` are still not generated. An earlier attempt got past the full-fleet run and failed in `make zone-loss`: after the instances were recreated, Envoy kept the removed addresses as members while they still passed health checks (`pending_dynamic_removal` in <http://localhost:47281/clusters>), so `cluster.app.membership_healthy` read 13 for 8 instances and `wait_for_members` timed out. That also inflates the fleet alerts. Setting `ignore_health_on_host_removal: true` on the `app` cluster in `deploy/envoy.yaml` is the likely fix, but it could not be confirmed here (Envoy's health checks timed out under the load), so it is not applied.
+
+Pending capacity: on a quiet machine run `make down && make run`, then `make test`, `make test-e2e` and `make test-measurements`; confirm the member count after `make reset-fleet` first and apply the Envoy change if it reads above 8.
+
 ## Done when: the lesson's checklist and the proof for each line
 
 | # | Done when (from the lesson) | Command | What proves it |
@@ -141,7 +153,7 @@ The dependency rule (domain depends on nothing; application on domain; infrastru
 - **Ports in use:** stop whatever uses them, or set other ports in `.env` (see `.env.example`).
 - **The knee test says no knee:** the load never got high enough; raise `--steps` (the default goes to 1,600 requests a second per instance) or raise `WORK_ROUNDS` so that one instance saturates sooner.
 - **The generator warns it was late:** the machine is short of CPU. Close other work, give Docker more CPUs, or lower the target; do not trust numbers measured while it warns.
-- **`make zone-loss` hangs waiting for healthy instances:** `docker compose ps` should show the survivors healthy; Envoy's view is at <http://localhost:47281/clusters>.
+- **`make zone-loss` hangs waiting for healthy instances:** `docker compose ps` should show the survivors healthy; Envoy's view is at <http://localhost:47281/clusters>. If `cluster.app.membership_healthy` counts more instances than exist, look for `pending_dynamic_removal` hosts there (see the verification note above).
 - **Logs:** `docker compose logs lb app-a1 ledger`.
 
 ## Author and license
