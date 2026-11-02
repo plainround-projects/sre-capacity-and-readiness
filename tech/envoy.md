@@ -116,6 +116,9 @@ clusters:
         - max_connections: 4096
           max_pending_requests: 4096
           max_requests: 4096
+          # Envoy allows only 3 retries in flight by default. When an instance stops, every request that was headed for
+          # it is retried at once, so a rolling restart at 1,000 requests a second overflowed that budget into 503s.
+          max_retries: 1000
     health_checks:
       - timeout: 1s
         interval: 1s
@@ -216,6 +219,17 @@ ignore_health_on_host_removal: true
 ```
 
 When Compose recreates an instance, the container gets a new IP address. With `STRICT_DNS`, Envoy notices that DNS no longer returns the old address. By default it still keeps that host as a member for as long as the host passes its active health check, marked `/pending_dynamic_removal` in `/clusters`, and it counts it in `cluster.app.membership_healthy`. A run on this repository showed 13 and 15 members for 8 instances for that reason, which made the zone-loss test wait forever and would have made the `FleetBelowPeakCapacity` alert read a fleet that no longer exists. `ignore_health_on_host_removal: true` says: do not wait for the removed host to fail its health check, drop it as soon as DNS stops returning it.
+
+### The retry budget
+
+```python
+max_requests: 4096
+# Envoy allows only 3 retries in flight by default. When an instance stops, every request that was headed for
+# it is retried at once, so a rolling restart at 1,000 requests a second overflowed that budget into 503s.
+max_retries: 1000
+```
+
+Envoy limits how many retries may be in flight at once; the default is 3. The route retries a request once when the connection fails, and when an instance stops, every request headed for it is retried at the same moment. At 1,000 requests a second that overflowed the budget (`upstream_rq_retry_overflow` rose by exactly the number of failed requests) and the overflow became 503s: a single restart cost 39 requests. With `max_retries: 1000`, four restarts under load cost 0 to 8 requests, and with the instance draining first (see the interfaces note), none.
 
 ## Try it yourself
 

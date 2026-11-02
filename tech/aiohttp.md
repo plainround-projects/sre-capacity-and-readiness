@@ -149,12 +149,17 @@ def build_app(pool: AsyncConnectionPool, metrics: LedgerMetrics, hold_s: float) 
 
 ```python
 def build_ops_app(
-    render_metrics: Callable[[], bytes], is_ready: Callable[[], Awaitable[bool]] | None = None
+    render_metrics: Callable[[], bytes],
+    is_ready: Callable[[], Awaitable[bool]] | None = None,
+    is_draining: Callable[[], bool] | None = None,
 ) -> web.Application:
-    """`/healthz` says the process is alive, `/readyz` that its dependency answers, `/metrics` the Prometheus text."""
+    """`/healthz` says the process is alive (503 once it is draining, so the load balancer stops sending),
+    `/readyz` that its dependency answers, `/metrics` the Prometheus text."""
     app = web.Application()
 
     async def healthz(_: web.Request) -> web.Response:
+        if is_draining is not None and is_draining():
+            return web.json_response({"status": "draining"}, status=503)
         return web.json_response({"status": "ok"})
 
     async def readyz(_: web.Request) -> web.Response:

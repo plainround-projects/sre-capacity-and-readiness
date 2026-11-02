@@ -6,7 +6,7 @@ Docker Compose is a tool, built into the `docker` command as `docker compose`, t
 
 ## Why this repository uses it
 
-A capacity test needs a stable thing to measure. Compose gives each of the nine service instances a fixed **1.0 CPU** and **256 MiB** of memory, so "the capacity of one instance" is a number that does not depend on what else runs on the machine. Compose also wires the whole fleet: Envoy in front, a shared ledger and PostgreSQL behind, Prometheus watching, and a load generator that runs inside the same network so a laptop's port forwarding is not part of the measurement. The experiments also use Compose commands to stop a zone, freeze the ledger and replace instances one by one.
+A capacity test needs a stable thing to measure. Compose gives each of the nine service instances a vCPU of its own (pinned with `cpuset`) and **256 MiB** of memory, so "the capacity of one instance" is a number that does not depend on what else runs on the machine. Compose also wires the whole fleet: Envoy in front, a shared ledger and PostgreSQL behind, Prometheus watching, and a load generator that runs inside the same network so a laptop's port forwarding is not part of the measurement. The experiments also use Compose commands to stop a zone, freeze the ledger and replace instances one by one.
 
 ## Where it appears
 
@@ -22,7 +22,7 @@ A capacity test needs a stable thing to measure. Compose gives each of the nine 
 
 - Compose reads the file, fills `${NAME:-default}` from the shell or `.env`, and asks the Docker daemon to create what is described.
 - Compose creates a private **network** for the project. Each service gets a DNS name equal to its service name (`app-a1`, `lb`, `ledger`, `db`). **Published** ports (`ports:`) are an extra door from your computer into one container.
-- `cpus: 1.0` limits a container to the equivalent of one CPU core, enforced by the Linux kernel: a process that wants more is slowed down (**throttled**). `mem_limit: 256m` kills a container that exceeds 256 MiB. `cpu_shares: 4096` is a *relative weight* when CPUs are contended (the default is 1024): this container gets four times the default share.
+- `cpuset: "0"` (on each instance, with a different number) pins a container to the CPU numbered 0, so no other instance shares that core, and 100% of that core means the core is full. `cpus: 1.0` was used first: it is a **quota** (100 ms of CPU time in every 100 ms period) and the kernel throttles a busy container in bursts, which the cgroup counters showed (`nr_throttled` rose in 8 of 103 periods at 73% use) and which made p99 jump long before the core was full. `mem_limit: 256m` kills a container that exceeds 256 MiB. `cpu_shares: 4096` is a *relative weight* when CPUs are contended (the default is 1024): this container gets four times the default share.
 - A **profile** (`profiles: ["tools"]`) hides a service unless asked for; `docker compose run --rm loadtest ...` starts it for one command and removes it afterwards.
 - `docker compose up -d --no-deps --force-recreate --wait app-a1` replaces one container with a fresh one (stopping the old one gracefully) and waits until it is healthy.
 - `docker compose stop` / `start` stop and start existing containers; `pause` freezes a container's processes without closing its connections (the nastiest dependency failure: it accepts connections and never answers).
@@ -33,7 +33,7 @@ A capacity test needs a stable thing to measure. Compose gives each of the nine 
 
 ```yaml
 # The fleet: up to 9 instances in 3 zones (3/3/3), of which the capacity plan says how many run, behind an Envoy load balancer, a shared ledger with a bounded pool, and
-# PostgreSQL behind it. Every instance is a container with a fixed 1.0 CPU and 256 MiB limit, so one instance's
+# PostgreSQL behind it. Every instance is a container pinned to its own vCPU with a 256 MiB limit, so one instance's
 # capacity is a stable number. Prometheus scrapes Envoy (the edge) and every instance.
 name: sre-capacity-and-readiness
 
@@ -46,11 +46,16 @@ x-instance: &instance
   security_opt: ["no-new-privileges:true"]
   cap_drop: ["ALL"]
   tmpfs: ["/tmp"]
-  cpus: 1.0
+  # One whole vCPU of its own, not a 1.0 CPU quota: a CFS quota throttles a busy container in bursts (measured: 8 of 103
+  # periods throttled at 73% use, p99 58 ms), so latency would jump long before the core is full. Pinned to a core only
+  # this instance may use (cores 9 to 11 are shared by the balancer, ledger, database, Prometheus and load generator), 100% of the core means the core is full.
   mem_limit: 256m
   stop_grace_period: 15s
+  # The check runs inside the container, on the instance's own core. Starting a Python interpreter every 5 seconds
+  # stalled the event loop for 30 to 70 ms each time (a spike in two of every five 2-second windows of p99); a bash
+  # /dev/tcp request costs a couple of milliseconds.
   healthcheck:
-    test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:9101/healthz', timeout=2)"]
+    test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9101 && printf 'GET /healthz HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q ok <&3"]
     interval: 5s
     timeout: 15s
     retries: 40
@@ -69,10 +74,10 @@ x-instance-env: &instance-env
 - `x-instance: &instance` is an **extension field** (ignored by Compose; a place to write settings once) with a YAML **anchor** `&instance`. `<<: *instance` in each service merges it in (see the YAML note).
 - `build: .` and `image: sre-capacity-and-readiness:dev` build the one image; `command: ["capacity-instance"]` starts an instance.
 - `restart: unless-stopped`, `read_only: true`, `security_opt: ["no-new-privileges:true"]`, `cap_drop: ["ALL"]` and `tmpfs: ["/tmp"]` are the hardening settings explained in the Docker notes of this track: restart after a crash, a read-only root file system with a memory-backed `/tmp`, no privilege gain, no Linux capabilities.
-- `cpus: 1.0` and `mem_limit: 256m`: the fixed budget per instance.
+- `mem_limit: 256m`: the memory budget per instance. The CPU is not set here but per instance with `cpuset` (see below).
 - `stop_grace_period: 15s`: when told to stop, give the process up to 15 seconds to finish in-flight requests before it is killed. The rollout test relies on that.
-- `healthcheck` runs a Python one-liner that opens `http://localhost:9101/healthz` and fails if it cannot (`interval: 5s`, `timeout: 15s`, `retries: 40`, `start_period: 10s`; generous because the build machine was often busy).
-- `x-instance-env: &instance-env` holds the environment shared by every instance: `WORK_ROUNDS` (how many SHA-256 rounds each request burns, default 3000), `LEDGER_URL` (empty means no shared dependency), `LEDGER_TIMEOUT_S`, `VERSION` (`${APP_VERSION:-v1}`, how the rollout test tells releases apart) and `LOG_LEVEL`.
+- `healthcheck` runs `bash -c` with a `/dev/tcp` request to `http://localhost:9101/healthz` and passes only if the reply contains `ok` (`interval: 5s`, `timeout: 15s`, `retries: 40`, `start_period: 10s`; generous because the build machine was often busy). It used to start a Python interpreter every 5 seconds on the instance's own core, which stalled the event loop for 30 to 70 ms each time; a bash request costs a couple of milliseconds. While the instance is draining, `/healthz` answers 503, so this check also fails then.
+- `x-instance-env: &instance-env` holds the environment shared by every instance: `WORK_ROUNDS` (how many SHA-256 rounds each request burns, default 6000), `LEDGER_URL` (empty means no shared dependency), `LEDGER_TIMEOUT_S`, `VERSION` (`${APP_VERSION:-v1}`, how the rollout test tells releases apart) and `LOG_LEVEL`.
 
 ### The nine instances
 
@@ -80,6 +85,7 @@ x-instance-env: &instance-env
 services:
   app-a1:
     <<: *instance
+    cpuset: "0"
     environment:
       <<: *instance-env
       ZONE: a
@@ -89,12 +95,14 @@ services:
       - "127.0.0.1:${APP_A1_OPS_PORT:-47283}:9101"
   app-a2:
     <<: *instance
+    cpuset: "1"
     environment:
       <<: *instance-env
       ZONE: a
       INSTANCE: a2
   app-a3:
     <<: *instance
+    cpuset: "2"
     environment:
       <<: *instance-env
       ZONE: a
@@ -108,6 +116,7 @@ Each instance merges the block and then sets `ZONE` and `INSTANCE` (`a`, `a1`...
 ```yaml
 lb:
   image: envoyproxy/envoy:v1.32.3
+  cpuset: "9-11"
   restart: unless-stopped
   command: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "warn"]
   volumes:
@@ -149,6 +158,11 @@ lb:
 ```yaml
 db:
   image: postgres:18
+  cpuset: "9-11"
+  # The ledger writes an entry per request, 2,000 times a second at the projected peak. Waiting for a disk flush on
+  # every commit stalled requests for 100 to 400 ms on a laptop's virtual disk and hid the pool; the entries are
+  # test data, so a commit may return before its flush.
+  command: ["postgres", "-c", "synchronous_commit=off"]
   restart: unless-stopped
   environment:
     POSTGRES_DB: ledger
@@ -177,6 +191,7 @@ ledger:
   cap_drop: ["ALL"]
   tmpfs: ["/tmp"]
   cpus: 2.0
+  cpuset: "9-11"
   mem_limit: 256m
   depends_on:
     db:
@@ -186,6 +201,8 @@ ledger:
     POOL_SIZE: ${POOL_SIZE:-20}
     POOL_TIMEOUT_S: ${POOL_TIMEOUT_S:-0.4}
     HOLD_MS: ${HOLD_MS:-10}
+    # Two processes share the ledger's port and its pool: one Python event loop cannot take the projected peak.
+    WORKERS: ${LEDGER_WORKERS:-2}
     LOG_LEVEL: ${LOG_LEVEL:-INFO}
   ports:
     - "127.0.0.1:${LEDGER_OPS_PORT:-47284}:9102"
@@ -206,6 +223,7 @@ prometheus:
   image: prom/prometheus:v3.5.0
   restart: unless-stopped
   cpus: 0.5
+  cpuset: "9-11"
   command:
     - --config.file=/etc/prometheus/prometheus.yml
     - --storage.tsdb.retention.time=1d
@@ -239,6 +257,7 @@ loadtest:
   entrypoint: ["capacity-loadtest"]
   # The generator must never be the slow party: give it the largest CPU share so its own lag stays out of the numbers.
   cpu_shares: 4096
+  cpuset: "9-11"
   read_only: true
   security_opt: ["no-new-privileges:true"]
   cap_drop: ["ALL"]
@@ -334,36 +353,42 @@ Zone A's instances `app-a2` and `app-a3` are written exactly like `app-a1` witho
 ```yaml
 app-b1:
   <<: *instance
+  cpuset: "3"
   environment:
     <<: *instance-env
     ZONE: b
     INSTANCE: b1
 app-b2:
   <<: *instance
+  cpuset: "4"
   environment:
     <<: *instance-env
     ZONE: b
     INSTANCE: b2
 app-b3:
   <<: *instance
+  cpuset: "5"
   environment:
     <<: *instance-env
     ZONE: b
     INSTANCE: b3
 app-c1:
   <<: *instance
+  cpuset: "6"
   environment:
     <<: *instance-env
     ZONE: c
     INSTANCE: c1
 app-c2:
   <<: *instance
+  cpuset: "7"
   environment:
     <<: *instance-env
     ZONE: c
     INSTANCE: c2
 app-c3:
   <<: *instance
+  cpuset: "8"
   environment:
     <<: *instance-env
     ZONE: c
@@ -371,6 +396,19 @@ app-c3:
 ```
 
 `<<: *instance` copies the shared service definition (the anchor `instance`) and `<<: *instance-env` copies the shared environment, then the two lines `ZONE` and `INSTANCE` say which zone and which instance this container is. That makes nine instances in all, three in each zone. The capacity plan decides how many of them run (`make set-fleet` stops the spares): for example eight as 3/3/2, where losing zone a removes three and leaves the five that carry the projected peak.
+
+### What the later changes added to the compose file
+
+- The shared environment line `DRAIN_S: ${DRAIN_S:-3}` (below): on a stop, an instance keeps serving for 3 seconds with `/healthz` at 503, so Envoy (health checks every second, one failure marks it unhealthy) takes it out of rotation before the process stops accepting connections. It must be well under `stop_grace_period: 15s`.
+- `cpuset: "9-11"` on `lb`, `db`, `ledger`, `prometheus` and `loadtest`: the five non-instance services share three cores that no instance uses, so the instances' cores are theirs alone.
+- On `db`, `command: ["postgres", "-c", "synchronous_commit=off"]`: the ledger writes an entry per request, 2,000 a second at the projected peak, and waiting for a disk flush on each commit stalled requests by 100 to 400 ms on a laptop's virtual disk. The entries are test data, so a commit may return before its flush.
+- On `ledger`, `WORKERS: ${LEDGER_WORKERS:-2}`: two processes share the ledger's port and pool (see the interfaces note), because one Python event loop ran out of a core near 1,750 requests a second.
+
+The drain setting as it appears in the shared environment:
+
+```yaml
+DRAIN_S: ${DRAIN_S:-3}
+```
 
 ## Try it yourself
 
@@ -390,8 +428,8 @@ app-c3:
 
 ## Check yourself
 
-1. What does `cpus: 1.0` do?
-   *Answer: limits the container to one CPU core's worth of time; it is throttled beyond that.*
+1. What does `cpuset: "3"` do?
+   *Answer: pins the container to the CPU numbered 3, so it never runs anywhere else.*
 2. What does a profile do?
    *Answer: hides a service unless you name the profile or run the service explicitly.*
 3. Why does the load generator run in the Compose network?

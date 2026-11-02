@@ -205,3 +205,57 @@ def test_cpu_work_costs_real_time_that_grows_with_the_rounds():
     started = time.perf_counter()
     cpu_work(40_000)
     assert time.perf_counter() - started > small
+
+
+async def test_a_service_that_never_answers_cannot_swamp_the_generator():
+    """Past the backlog, scheduled requests count as failed at once instead of piling up as tasks."""
+
+    async def never(_):
+        await asyncio.sleep(30)
+
+    app = web.Application()
+    app.router.add_get("/work", never)
+    server = await start(app)
+    runner = RawOpenLoopRunner("127.0.0.1", server.port, max_connections=2, timeout_s=1.0)
+    try:
+        samples, _ = await runner.run(rps=200, duration_s=0.5)
+    finally:
+        await runner.close()
+        await server.close()
+    assert len(samples) == 100
+    assert not any(sample.ok for sample in samples)
+    assert sum(sample.latency_s < 0.1 for sample in samples) > 80  # shed at once, not after the 1 second timeout
+
+
+async def test_a_draining_instance_says_so_on_its_health_check_and_keeps_serving():
+    """On a stop the process first fails /healthz, so the load balancer drains it, and only then closes."""
+    draining = {"now": False}
+    metrics = InstanceMetrics("b", "b2")
+    server = await start(instance_app.build_app(settings(), metrics))
+    ops = await start(build_ops_app(metrics.render, is_draining=lambda: draining["now"]))
+    try:
+        assert (await get(f"http://127.0.0.1:{ops.port}/healthz"))[0] == 200
+        draining["now"] = True
+        status, _, body = await get(f"http://127.0.0.1:{ops.port}/healthz")
+        assert (status, '"draining"' in body) == (503, True)
+        assert (await get(f"http://127.0.0.1:{server.port}/work"))[0] == 200
+    finally:
+        await server.close()
+        await ops.close()
+
+
+async def test_serve_marks_the_process_draining_before_it_stops():
+    from capacity.infrastructure.http_runtime import serve
+
+    events: list[str] = []
+    stop = asyncio.Event()
+    app = web.Application()
+    task = asyncio.create_task(
+        serve([(app, 0)], stop=stop, drain_s=0.2, on_drain=lambda: events.append("drain"), host="127.0.0.1")
+    )
+    await asyncio.sleep(0.2)
+    started = time.perf_counter()
+    stop.set()
+    await task
+    assert events == ["drain"]
+    assert time.perf_counter() - started >= 0.2

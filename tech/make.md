@@ -54,7 +54,7 @@ export STEP_SECONDS ?= 10
 export SOAK_SECONDS ?= 120
 CHECK_SECONDS ?= 40
 
-.PHONY: help install preflight clean-evidence set-fleet up reset-fleet run knee soak plan plan-doc full-fleet zone-loss pool-sweep dependency-test rollout-test restore-test review test-measurements \
+.PHONY: help install preflight clean-evidence set-fleet confirm-plan up reset-fleet run knee soak plan plan-doc full-fleet zone-loss pool-sweep dependency-test rollout-test restore-test review test-measurements \
         psql rules rules-check lint format test test-unit test-rules test-integration test-e2e audit check lock docker-build down clean
 ```
 
@@ -107,7 +107,7 @@ reset-fleet: ## recreate every instance without the shared dependency, at versio
 
 # The whole story, in the lesson's order: the knee, the safe load, the plan, the fleet and its lost zone, the next
 # bottleneck, the failures the review needs evidence for, and the review.
-run: preflight clean-evidence up reset-fleet knee soak plan set-fleet full-fleet zone-loss pool-sweep dependency-test rollout-test restore-test plan-doc review test-measurements ## the whole capacity and readiness exercise (about 20 minutes on a quiet machine)
+run: preflight clean-evidence up reset-fleet knee soak plan set-fleet full-fleet zone-loss confirm-plan pool-sweep dependency-test rollout-test restore-test plan-doc review test-measurements ## the whole capacity and readiness exercise (about 20 minutes on a quiet machine)
 ```
 
 - `up` builds and starts the fleet and waits until every health check passes (`--wait`).
@@ -139,6 +139,9 @@ soak: $(STAMP) ## hold one instance at the safe load for SOAK_SECONDS and check 
 
 ```make
 plan: $(STAMP) ## size the fleet from the measured safe load: the formula, the inputs, the result
+	$(VENV)/bin/capacity plan
+
+confirm-plan: $(STAMP) ## size the fleet again now that the lost-zone run exists, so the plan records that it was confirmed
 	$(VENV)/bin/capacity plan
 
 full-fleet: $(STAMP) ## run the projected peak (2,000 rps) on the planned fleet, no shared dependency yet
@@ -264,6 +267,21 @@ knee: $(STAMP) ## step the load up on one instance until p99 climbs; names the s
 ```
 
 The knee test writes to `knee.json.tmp` and renames it to `knee.json` only when the command succeeded; when the load generator decides the measurement is not valid (see the interfaces note) it exits with an error and the `||` branch deletes the temporary file. `mv` is atomic on one file system, so a reader never sees half a file. The soak recipe does the same with `soak.json.tmp`, and also passes `--ops http://app-a1:9101` so the soak can read the instance's CPU use.
+
+### Two more targets and a stricter soak
+
+```python
+confirm-plan: $(STAMP) ## size the fleet again now that the lost-zone run exists, so the plan records that it was confirmed
+	$(VENV)/bin/capacity plan
+```
+
+`confirm-plan` runs `capacity plan` a second time, after the lost-zone run exists: the first plan could not know the result, so `verified_by_lost_zone_run` was always false. It sits between `zone-loss` and `pool-sweep` in `run`.
+
+```python
+@$(PY) -c "import json,sys; d=json.load(open('$(EVIDENCE)/soak.json')); sys.exit(0 if d['within_slo'] else 'the soak at the safe load left the SLO: the safe load is not safe')"
+```
+
+After writing `soak.json`, the soak recipe exits with an error, and so stops `make run`, when the soak left the SLO: a safe load that is not safe makes the rest of the plan meaningless. (`sys.exit` with a string prints it and exits 1.)
 
 ## Try it yourself
 

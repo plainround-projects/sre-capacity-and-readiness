@@ -47,6 +47,7 @@ import time
 from collections.abc import AsyncIterator
 
 import aiohttp
+import uvloop
 from aiohttp import web
 
 from capacity.domain.cpu import cpu_work
@@ -130,17 +131,50 @@ def build_app(settings: InstanceSettings, metrics: InstanceMetrics) -> web.Appli
 async def run(settings: InstanceSettings) -> None:
     """Build from settings and serve until told to stop; in-flight requests finish before the process exits."""
     metrics = InstanceMetrics(settings.zone, settings.instance)
-    await serve([(build_app(settings, metrics), settings.port), (build_ops_app(metrics.render), settings.ops_port)])
+    draining = {"now": False}
+    await serve(
+        [
+            (build_app(settings, metrics), settings.port),
+            (build_ops_app(metrics.render, is_draining=lambda: draining["now"]), settings.ops_port),
+        ],
+        drain_s=settings.drain_s,
+        on_drain=lambda: draining.update(now=True),
+    )
 
 
 def main() -> None:
     """Entry point of `capacity-instance`."""
     settings = InstanceSettings.from_env(os.environ)
     configure_logging(settings.log_level)
-    asyncio.run(run(settings))
+    # uvloop cuts the cost of everything around the CPU work (the server, and the call to the ledger). The CPU work
+    # itself is unchanged, so the instance still saturates its core where the load test finds it.
+    asyncio.run(run(settings), loop_factory=uvloop.new_event_loop)
 ```
 
 `run` builds the metrics, then serves the public app and the ops app together. `main` reads the settings from `os.environ`, configures logging and starts the event loop with `asyncio.run`.
+
+#### Draining and a faster loop
+
+```python
+draining = {"now": False}
+await serve(
+    [
+        (build_app(settings, metrics), settings.port),
+        (build_ops_app(metrics.render, is_draining=lambda: draining["now"]), settings.ops_port),
+    ],
+    drain_s=settings.drain_s,
+    on_drain=lambda: draining.update(now=True),
+```
+
+`run` keeps a one-item dictionary as a mutable flag. The ops app's `/healthz` reads it; `serve` sets it through `on_drain` when the process is told to stop, and keeps both apps serving for `settings.drain_s` seconds before closing.
+
+```python
+# uvloop cuts the cost of everything around the CPU work (the server, and the call to the ledger). The CPU work
+# itself is unchanged, so the instance still saturates its core where the load test finds it.
+asyncio.run(run(settings), loop_factory=uvloop.new_event_loop)
+```
+
+`main` runs the instance on **uvloop**, a faster replacement for asyncio's event loop (see the uvloop note). It cuts the cost of everything around the CPU work (the server, and the call to the ledger); the SHA-256 work itself is unchanged, so the instance still saturates its core where the load test finds it.
 
 ### `interfaces/ledger_app.py`: the shared dependency
 
@@ -150,10 +184,15 @@ def main() -> None:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
+import multiprocessing
 import os
+import signal
+import sys
 from typing import Any
 
+import uvloop
 from aiohttp import web
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
@@ -248,7 +287,8 @@ async def run(settings: LedgerSettings) -> None:
             [
                 (build_app(pool, metrics, settings.hold_ms / 1000.0), settings.port),
                 (build_ops_app(metrics.render, ready), settings.ops_port),
-            ]
+            ],
+            reuse_port=settings.workers > 1,
         )
     finally:
         await pool.close()
@@ -257,14 +297,96 @@ async def run(settings: LedgerSettings) -> None:
 `run` creates the pool with the minimum equal to the maximum (so it is exactly `POOL_SIZE` connections), the acquire timeout, autocommit on and `open=False` (it is opened explicitly), then `await pool.open(wait=True, timeout=30)`. `in_use` is the pool size minus the available connections, read from `get_stats()`, and `LedgerMetrics` reads it and `requests_waiting` at scrape time. `ready` is the readiness check: borrow a connection for at most a second and run `SELECT 1`. The `finally` closes the pool when serving stops.
 
 ```python
+def pool_share(total: int, workers: int, index: int) -> int:
+    """Worker `index`'s part of a pool of `total` connections: as even as possible, the parts adding up to `total`."""
+    share, extra = divmod(total, workers)
+    return share + (1 if index < extra else 0)
+
+
+def _worker(settings: LedgerSettings, index: int) -> None:
+    """One worker process: its share of the pool, its own ops port (9102 + index), the shared public port."""
+    configure_logging(settings.log_level)
+    own = dataclasses.replace(
+        settings, pool_size=pool_share(settings.pool_size, settings.workers, index), ops_port=settings.ops_port + index
+    )
+    asyncio.run(run(own), loop_factory=uvloop.new_event_loop)
+
+
 def main() -> None:
-    """Entry point of `capacity-ledger`."""
+    """Entry point of `capacity-ledger`.
+
+    One Python event loop spent a whole core at about 1,750 requests a second, below the projected peak, so the
+    ledger runs `WORKERS` processes that share the public port (SO_REUSEPORT). The pool is split between them
+    (POOL_SIZE connections in all), each worker has its own ops port, and a stop signal is passed on to all of them.
+    """
     settings = LedgerSettings.from_env(os.environ)
     configure_logging(settings.log_level)
-    asyncio.run(run(settings))
+    if settings.workers == 1:
+        asyncio.run(run(settings), loop_factory=uvloop.new_event_loop)
+        return
+    context = multiprocessing.get_context("fork")
+    children = [context.Process(target=_worker, args=(settings, index)) for index in range(settings.workers)]
+    for child in children:
+        child.start()
 ```
 
 `main` reads `LedgerSettings` from the environment and runs the ledger.
+
+#### Several workers behind one port
+
+One Python event loop spent a whole core at about 1,750 requests a second, below the projected peak. The ledger now runs `WORKERS` processes.
+
+```python
+def pool_share(total: int, workers: int, index: int) -> int:
+    """Worker `index`'s part of a pool of `total` connections: as even as possible, the parts adding up to `total`."""
+    share, extra = divmod(total, workers)
+    return share + (1 if index < extra else 0)
+```
+
+`pool_share(total, workers, index)` splits the pool as evenly as possible with the parts adding up to the total: 25 over two workers is 13 and 12.
+
+```python
+def _worker(settings: LedgerSettings, index: int) -> None:
+    """One worker process: its share of the pool, its own ops port (9102 + index), the shared public port."""
+    configure_logging(settings.log_level)
+    own = dataclasses.replace(
+        settings, pool_size=pool_share(settings.pool_size, settings.workers, index), ops_port=settings.ops_port + index
+    )
+    asyncio.run(run(own), loop_factory=uvloop.new_event_loop)
+```
+
+`_worker` is the body of one child process: logging, then a copy of the settings with its own pool share and its own ops port (9102 plus its number), then the usual `run` on uvloop.
+
+```python
+def main() -> None:
+    """Entry point of `capacity-ledger`.
+
+    One Python event loop spent a whole core at about 1,750 requests a second, below the projected peak, so the
+    ledger runs `WORKERS` processes that share the public port (SO_REUSEPORT). The pool is split between them
+    (POOL_SIZE connections in all), each worker has its own ops port, and a stop signal is passed on to all of them.
+    """
+    settings = LedgerSettings.from_env(os.environ)
+    configure_logging(settings.log_level)
+    if settings.workers == 1:
+        asyncio.run(run(settings), loop_factory=uvloop.new_event_loop)
+        return
+    context = multiprocessing.get_context("fork")
+    children = [context.Process(target=_worker, args=(settings, index)) for index in range(settings.workers)]
+    for child in children:
+        child.start()
+
+    def stop(*_: object) -> None:
+        for child in children:
+            child.terminate()
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    for child in children:
+        child.join()
+    sys.exit(max((child.exitcode or 0) for child in children))
+```
+
+`main` runs a single worker in-process, as before, when `WORKERS` is 1. Otherwise it creates the children with the `fork` start method (each child is a copy of the parent), starts them, installs a handler so that SIGTERM or SIGINT in the parent `terminate`s every child (which gives each its own graceful shutdown), waits for them with `join`, and exits with the largest exit code. All workers bind the public port with `reuse_port`, so the kernel balances new connections between them. Prometheus scrapes both ops ports (`ledger:9102` and `ledger:9103`).
 
 ### `interfaces/loadtest_cli.py`: the load generator
 
@@ -280,6 +402,8 @@ import sys
 from collections.abc import Sequence
 from typing import Any
 from urllib.parse import urlsplit
+
+import uvloop
 
 from capacity.application.loadtest import knee_test, timed_run
 from capacity.infrastructure.logging_setup import configure_logging
@@ -368,13 +492,26 @@ def main(argv: Sequence[str] | None = None) -> None:
     """Entry point of `capacity-loadtest`."""
     configure_logging("WARNING")
     args = build_parser().parse_args(argv)
-    result, problem = asyncio.run(_knee(args) if args.command == "knee" else _timed(args))
+    # uvloop keeps the generator's own scheduling delay small at 2,000 requests a second.
+    result, problem = asyncio.run(
+        _knee(args) if args.command == "knee" else _timed(args), loop_factory=uvloop.new_event_loop
+    )
     if problem is not None:
         sys.exit(f"not a valid measurement, nothing written: {problem}. Run again when the machine is quiet.")
     print(json.dumps(result, indent=2))
 ```
 
 `build_parser` defines three subcommands: `knee` (with `--target`, `--ops`, `--steps`, `--step-seconds` and `--margin`) and `soak` and `fleet`, which share `--target`, `--rps`, `--seconds`, `--label`, `--slo-p99-ms` and `--window`. `main` runs the chosen one with `asyncio.run` and, if the generator's own p99 lag is over `GENERATOR_LAG_LIMIT_MS`, prints a warning on standard error that the numbers include the generator's own queueing, then prints the JSON.
+
+#### The generator on uvloop
+
+```python
+# uvloop keeps the generator's own scheduling delay small at 2,000 requests a second.
+result, problem = asyncio.run(
+    _knee(args) if args.command == "knee" else _timed(args), loop_factory=uvloop.new_event_loop
+```
+
+`asyncio.run` accepts a `loop_factory` since Python 3.12; passing `uvloop.new_event_loop` keeps the generator's own scheduling delay small at 2,000 requests a second.
 
 #### Refusing to save a measurement that cannot be trusted
 
@@ -425,7 +562,10 @@ async def _timed(args: argparse.Namespace) -> tuple[dict[str, Any], str | None]:
 `_timed` builds the probe only if `--ops` was given and passes the attempts to `timed_run`.
 
 ```python
-result, problem = asyncio.run(_knee(args) if args.command == "knee" else _timed(args))
+# uvloop keeps the generator's own scheduling delay small at 2,000 requests a second.
+result, problem = asyncio.run(
+    _knee(args) if args.command == "knee" else _timed(args), loop_factory=uvloop.new_event_loop
+)
 if problem is not None:
     sys.exit(f"not a valid measurement, nothing written: {problem}. Run again when the machine is quiet.")
 print(json.dumps(result, indent=2))

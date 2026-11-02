@@ -10,18 +10,21 @@ artifact.
 
 ## Decision
 
-Each instance is one container with `cpus: 1.0` and 256 MiB. A request runs `cpu_work(rounds)` (a chain of SHA-256,
-the rounds set by `WORK_ROUNDS`) on the asyncio event loop, deliberately blocking it. One instance is one
-event loop is one core, so its capacity is one over the cost of a request, and the queue that forms behind a busy
-loop is the saturation the load test must find. Handling requests in threads would add GIL contention without adding
-capacity.
+Each instance is one container with 256 MiB, pinned to a vCPU of its own (`cpuset`), and the other services share
+three further cores. A first version used a `cpus: 1.0` quota instead; a quota throttles a busy container in bursts
+(`nr_throttled` rose in 8 of 103 periods at 73% use, with p99 at 58 ms), so latency jumped long before the core was
+full. With a core of its own, 100% of the core means the core is full, and the load test names it as the resource.
 
-Compose runs 6,000 rounds (about two milliseconds, the lesson's) and the program's own default stays 3,000. A first
-run at 3,000 rounds did not give a clean knee on a 12-core laptop with the load generator, Envoy and the other sessions
-sharing the Docker VM: p99 rose at 70% of the core, and the generator itself fell behind above 700 requests a second. At
-6,000 rounds the knee falls near 500 requests a second, where the generator is comfortable and the queue behind a busy
-loop, not jitter, drives p99. Aggregate cost at the projected peak is 2,000 requests a second times two milliseconds,
-about four cores, which the VM can give. Every number in the plan comes from measuring, not from the lesson's.
+A request runs `cpu_work(rounds)` (a chain of SHA-256, the rounds set by `WORK_ROUNDS`) on the asyncio event loop,
+deliberately blocking it. One instance is one event loop is one core, so its capacity is one over the cost of a
+request, and the queue that forms behind a busy loop is the saturation the load test must find. Handling requests in
+threads would add GIL contention without adding capacity.
+
+Compose runs 6,000 rounds (about two milliseconds, the lesson's); the program's own default stays 3,000. At one
+millisecond a request the knee moved to 1,400 requests a second and the safe load ran the core at 88%, where a
+stall of a second on the host took seconds to drain. At two milliseconds the knee falls near 600 and the safe load
+leaves room to recover. Aggregate cost at the projected peak is 2,000 requests a second times two milliseconds, about
+four cores of the 12 the Docker VM has. Every number in the plan comes from measuring, not from the lesson's.
 
 ## Consequences
 

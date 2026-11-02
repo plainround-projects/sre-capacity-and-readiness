@@ -47,6 +47,7 @@ class InstanceSettings:
     port: int
     ops_port: int
     log_level: str
+    drain_s: float = 0.0
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> InstanceSettings:
@@ -62,6 +63,7 @@ class InstanceSettings:
             port=_port(env, "PORT", 8080),
             ops_port=_port(env, "OPS_PORT", 9101),
             log_level=_text(env, "LOG_LEVEL", "INFO").upper(),
+            drain_s=_number(env, "DRAIN_S", 3.0, 0.0, 12.0),
         )
 
 
@@ -76,6 +78,7 @@ class LedgerSettings:
     port: int
     ops_port: int
     log_level: str
+    workers: int = 1
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> LedgerSettings:
@@ -91,4 +94,5 @@ class LedgerSettings:
             port=_port(env, "PORT", 8082),
             ops_port=_port(env, "OPS_PORT", 9102),
             log_level=_text(env, "LOG_LEVEL", "INFO").upper(),
+            workers=int(_number(env, "WORKERS", 1, 1, 8)),
         )

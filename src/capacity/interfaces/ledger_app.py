@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
+import multiprocessing
 import os
+import signal
+import sys
 from typing import Any
 
+import uvloop
 from aiohttp import web
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
@@ -92,14 +97,51 @@ async def run(settings: LedgerSettings) -> None:
             [
                 (build_app(pool, metrics, settings.hold_ms / 1000.0), settings.port),
                 (build_ops_app(metrics.render, ready), settings.ops_port),
-            ]
+            ],
+            reuse_port=settings.workers > 1,
         )
     finally:
         await pool.close()
 
 
+def pool_share(total: int, workers: int, index: int) -> int:
+    """Worker `index`'s part of a pool of `total` connections: as even as possible, the parts adding up to `total`."""
+    share, extra = divmod(total, workers)
+    return share + (1 if index < extra else 0)
+
+
+def _worker(settings: LedgerSettings, index: int) -> None:
+    """One worker process: its share of the pool, its own ops port (9102 + index), the shared public port."""
+    configure_logging(settings.log_level)
+    own = dataclasses.replace(
+        settings, pool_size=pool_share(settings.pool_size, settings.workers, index), ops_port=settings.ops_port + index
+    )
+    asyncio.run(run(own), loop_factory=uvloop.new_event_loop)
+
+
 def main() -> None:
-    """Entry point of `capacity-ledger`."""
+    """Entry point of `capacity-ledger`.
+
+    One Python event loop spent a whole core at about 1,750 requests a second, below the projected peak, so the
+    ledger runs `WORKERS` processes that share the public port (SO_REUSEPORT). The pool is split between them
+    (POOL_SIZE connections in all), each worker has its own ops port, and a stop signal is passed on to all of them.
+    """
     settings = LedgerSettings.from_env(os.environ)
     configure_logging(settings.log_level)
-    asyncio.run(run(settings))
+    if settings.workers == 1:
+        asyncio.run(run(settings), loop_factory=uvloop.new_event_loop)
+        return
+    context = multiprocessing.get_context("fork")
+    children = [context.Process(target=_worker, args=(settings, index)) for index in range(settings.workers)]
+    for child in children:
+        child.start()
+
+    def stop(*_: object) -> None:
+        for child in children:
+            child.terminate()
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    for child in children:
+        child.join()
+    sys.exit(max((child.exitcode or 0) for child in children))

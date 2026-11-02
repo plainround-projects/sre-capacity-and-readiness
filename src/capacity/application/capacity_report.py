@@ -53,7 +53,7 @@ def _header(plan: dict[str, Any]) -> list[str]:
         f"**{plan['future_peak_rps']:g}** "
         f"(growth {plan['growth_factor']:g}x).",
         "- Latency SLO: **p99 under 50 ms**.",
-        "- Each instance is a container with a fixed 1.0 CPU and 256 MiB; a request burns real CPU "
+        "- Each instance is a container pinned to a vCPU of its own with 256 MiB; a request burns real CPU "
         "(`WORK_ROUNDS` rounds of SHA-256).",
         "",
     ]

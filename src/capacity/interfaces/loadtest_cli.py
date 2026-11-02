@@ -10,6 +10,8 @@ from collections.abc import Sequence
 from typing import Any
 from urllib.parse import urlsplit
 
+import uvloop
+
 from capacity.application.loadtest import knee_test, timed_run
 from capacity.infrastructure.logging_setup import configure_logging
 from capacity.infrastructure.openloop import MetricsCpuProbe, RawOpenLoopRunner
@@ -94,7 +96,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     """Entry point of `capacity-loadtest`."""
     configure_logging("WARNING")
     args = build_parser().parse_args(argv)
-    result, problem = asyncio.run(_knee(args) if args.command == "knee" else _timed(args))
+    # uvloop keeps the generator's own scheduling delay small at 2,000 requests a second.
+    result, problem = asyncio.run(
+        _knee(args) if args.command == "knee" else _timed(args), loop_factory=uvloop.new_event_loop
+    )
     if problem is not None:
         sys.exit(f"not a valid measurement, nothing written: {problem}. Run again when the machine is quiet.")
     print(json.dumps(result, indent=2))

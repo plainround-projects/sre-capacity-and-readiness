@@ -127,7 +127,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     """Entry point of `capacity-loadtest`."""
     configure_logging("WARNING")
     args = build_parser().parse_args(argv)
-    result, problem = asyncio.run(_knee(args) if args.command == "knee" else _timed(args))
+    # uvloop keeps the generator's own scheduling delay small at 2,000 requests a second.
+    result, problem = asyncio.run(
+        _knee(args) if args.command == "knee" else _timed(args), loop_factory=uvloop.new_event_loop
+    )
     if problem is not None:
         sys.exit(f"not a valid measurement, nothing written: {problem}. Run again when the machine is quiet.")
     print(json.dumps(result, indent=2))

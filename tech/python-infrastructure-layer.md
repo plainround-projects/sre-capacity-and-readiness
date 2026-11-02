@@ -90,6 +90,7 @@ class InstanceSettings:
     port: int
     ops_port: int
     log_level: str
+    drain_s: float = 0.0
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> InstanceSettings:
@@ -105,6 +106,7 @@ class InstanceSettings:
             port=_port(env, "PORT", 8080),
             ops_port=_port(env, "OPS_PORT", 9101),
             log_level=_text(env, "LOG_LEVEL", "INFO").upper(),
+            drain_s=_number(env, "DRAIN_S", 3.0, 0.0, 12.0),
         )
 ```
 
@@ -122,6 +124,7 @@ class LedgerSettings:
     port: int
     ops_port: int
     log_level: str
+    workers: int = 1
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> LedgerSettings:
@@ -137,10 +140,23 @@ class LedgerSettings:
             port=_port(env, "PORT", 8082),
             ops_port=_port(env, "OPS_PORT", 9102),
             log_level=_text(env, "LOG_LEVEL", "INFO").upper(),
+            workers=int(_number(env, "WORKERS", 1, 1, 8)),
         )
 ```
 
 `LedgerSettings` is the shared ledger service's configuration. `DATABASE_URL` has no default and must start with `postgresql://`. `POOL_SIZE` (default 20, at most 90), `POOL_TIMEOUT_S` (0.4), `HOLD_MS` (10, the time a request holds its connection, which models the real work done while holding it), the ports 8082 and 9102 and the log level.
+
+#### Two new settings
+
+`InstanceSettings.drain_s` (`DRAIN_S`, default 3, between 0 and 12 seconds) is how long an instance drains before it stops, and `LedgerSettings.workers` (`WORKERS`, default 1, between 1 and 8) is how many processes the ledger runs. Both have defaults in the dataclass so existing code that builds the settings by hand keeps working:
+
+```python
+drain_s=_number(env, "DRAIN_S", 3.0, 0.0, 12.0),
+```
+
+```python
+workers=int(_number(env, "WORKERS", 1, 1, 8)),
+```
 
 ### `infrastructure/logging_setup.py`
 
@@ -316,12 +332,17 @@ from aiohttp import web
 
 
 def build_ops_app(
-    render_metrics: Callable[[], bytes], is_ready: Callable[[], Awaitable[bool]] | None = None
+    render_metrics: Callable[[], bytes],
+    is_ready: Callable[[], Awaitable[bool]] | None = None,
+    is_draining: Callable[[], bool] | None = None,
 ) -> web.Application:
-    """`/healthz` says the process is alive, `/readyz` that its dependency answers, `/metrics` the Prometheus text."""
+    """`/healthz` says the process is alive (503 once it is draining, so the load balancer stops sending),
+    `/readyz` that its dependency answers, `/metrics` the Prometheus text."""
     app = web.Application()
 
     async def healthz(_: web.Request) -> web.Response:
+        if is_draining is not None and is_draining():
+            return web.json_response({"status": "draining"}, status=503)
         return web.json_response({"status": "ok"})
 
     async def readyz(_: web.Request) -> web.Response:
@@ -339,6 +360,17 @@ def build_ops_app(
 
 Every process exposes a small second web app on its own port. `/healthz` answers 200 `{"status": "ok"}` while the process is alive. `/readyz` calls `is_ready()` (when given) and answers 200 `ready` or 503 `not ready`; the instance uses it to say whether the ledger answers. `/metrics` returns the Prometheus text. The handlers are nested functions that capture `render_metrics` and `is_ready`.
 
+#### Saying "draining"
+
+The new `is_draining` argument is a function the health handler calls first:
+
+```python
+if is_draining is not None and is_draining():
+    return web.json_response({"status": "draining"}, status=503)
+```
+
+Once the process is draining, `/healthz` answers 503 `{"status": "draining"}`. Envoy's next health check marks the instance unhealthy and stops sending it requests while it is still serving the ones already on their way.
+
 ### `infrastructure/http_runtime.py`
 
 ```python
@@ -349,7 +381,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from aiohttp import web
 
@@ -361,8 +393,15 @@ async def serve(
     stop: asyncio.Event | None = None,
     shutdown_timeout: float = 10.0,
     host: str = "0.0.0.0",
+    reuse_port: bool = False,
+    drain_s: float = 0.0,
+    on_drain: Callable[[], None] | None = None,
 ) -> None:
-    """Start every application on its port and block until `stop` is set or a termination signal arrives."""
+    """Start every application on its port and block until `stop` is set or a termination signal arrives.
+
+    On the way out the process first says it is draining (`on_drain`) and keeps serving for `drain_s` seconds, so a
+    load balancer's health checks can take it out of rotation before it stops accepting connections.
+    """
     stop = stop or asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
@@ -373,9 +412,13 @@ async def serve(
             runner = web.AppRunner(app, access_log=None, shutdown_timeout=shutdown_timeout)
             await runner.setup()
             runners.append(runner)
-            await web.TCPSite(runner, host, port).start()
+            await web.TCPSite(runner, host, port, reuse_port=reuse_port).start()
             log.info("listening", extra={"port": port})
         await stop.wait()
+        log.info("draining", extra={"seconds": drain_s})
+        if on_drain is not None:
+            on_drain()
+        await asyncio.sleep(drain_s)
         log.info("shutting down")
     finally:
         for runner in runners:
@@ -383,6 +426,19 @@ async def serve(
 ```
 
 `serve` starts every application on its port and blocks until a stop event is set or SIGTERM or SIGINT arrives (`loop.add_signal_handler` turns a signal into `stop.set()`). Each application gets a `web.AppRunner` (with the access log off and a shutdown timeout so in-flight requests finish) and a `TCPSite`. The `finally` block cleans every runner up even if start-up fails half-way. This is what makes a rolling restart lose no request: Docker sends SIGTERM, the process stops listening, finishes what it is doing and exits.
+
+#### Draining before stopping
+
+```python
+await stop.wait()
+log.info("draining", extra={"seconds": drain_s})
+if on_drain is not None:
+    on_drain()
+await asyncio.sleep(drain_s)
+log.info("shutting down")
+```
+
+When the stop event is set (SIGTERM, SIGINT or a test), the process first logs `draining`, calls `on_drain` (the instance uses it to flip a flag) and keeps serving for `drain_s` seconds, then logs `shutting down` and lets the `finally` block close the listeners. The new `drain_s` and `on_drain` parameters default to 0 and `None`, so the ledger behaves as before. `reuse_port=True` (used by the ledger's workers) passes `reuse_port` to each `TCPSite`: the kernel lets several processes bind the same port (the socket option SO_REUSEPORT) and spreads new connections between them.
 
 ### `infrastructure/openloop.py`: the open-loop generator
 
@@ -422,11 +478,15 @@ class RawOpenLoopRunner:
     def __init__(
         self, host: str, port: int, path: str = "/work", max_connections: int = 512, timeout_s: float = 5.0
     ) -> None:
-        """`max_connections` bounds requests in flight; a request that waits for a connection still counts that wait."""
+        """`max_connections` bounds requests in flight; a request that waits for a connection still counts that wait.
+
+        Twice that many requests may be outstanding; beyond it a scheduled request is counted as failed at once.
+        """
         self._host = host
         self._port = port
         self._request = f"GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: capacity-loadtest\r\n\r\n".encode()
         self._limit = asyncio.Semaphore(max_connections)
+        self._backlog = 2 * max_connections
         self._timeout_s = timeout_s
         self._idle: deque[_Connection] = deque()
 ```
@@ -454,9 +514,14 @@ async def run(self, rps: float, duration_s: float) -> tuple[list[Sample], float]
         while index < due:
             scheduled = start + index / rps
             lags.append(now - scheduled)
-            task = loop.create_task(one(scheduled))
-            tasks.add(task)
-            task.add_done_callback(tasks.discard)
+            if len(tasks) >= self._backlog:
+                # The service is so far behind that requests are piling up unsent. Count the request as failed
+                # now instead of queueing a task for it: thousands of waiting tasks would slow the generator itself.
+                samples.append(Sample(scheduled - start, loop.time() - scheduled, False))
+            else:
+                task = loop.create_task(one(scheduled))
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
             index += 1
         await asyncio.sleep(max(0.0005, start + index / rps - loop.time()))
     if tasks:
@@ -542,6 +607,21 @@ class MetricsCpuProbe:
 ```
 
 `MetricsCpuProbe` is the `CpuProbe`: it opens a connection to the instance's ops port, sends `GET /metrics`, reads the whole reply, finds the `process_cpu_seconds_total` line with the regular expression and returns its value, or raises `ValueError` when the instance exports no such counter.
+
+#### A limit on the backlog
+
+```python
+self._backlog = 2 * max_connections
+```
+
+```python
+if len(tasks) >= self._backlog:
+    # The service is so far behind that requests are piling up unsent. Count the request as failed
+    # now instead of queueing a task for it: thousands of waiting tasks would slow the generator itself.
+    samples.append(Sample(scheduled - start, loop.time() - scheduled, False))
+```
+
+The generator allows twice `max_connections` requests to be outstanding. Beyond that the service is so far behind that requests would pile up unsent, and thousands of waiting tasks slow the generator's own loop (it ran 126 ms late in a collapse). So a scheduled request past the limit is counted as failed at once, with the time it waited so far. A run with dropped requests has errors, which is the service's evidence, not the generator's.
 
 ### `infrastructure/compose.py`: the experiments' hands
 

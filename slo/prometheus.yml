@@ -23,4 +23,4 @@ scrape_configs:
         labels: {zone: c}
   - job_name: ledger
     static_configs:
-      - targets: ["ledger:9102"]
+      - targets: ["ledger:9102", "ledger:9103"]

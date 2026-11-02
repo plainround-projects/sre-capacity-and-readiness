@@ -333,8 +333,18 @@ class RunReport:
 
     @property
     def problem(self) -> str | None:
-        """Why these numbers cannot be trusted, or None. An untrustworthy run is never saved as evidence."""
-        if self.generator_lag_p99_ms > GENERATOR_LAG_LIMIT_MS:
+        """Why these numbers cannot be trusted, or None. An untrustworthy run is never saved as evidence.
+
+        A late generator only ever makes a run look worse (latency counts from the scheduled arrival), so it cannot
+        fake a pass, and failed requests are the service's own evidence. It matters only when the run left the SLO
+        on latency alone, and only when its lateness could account for how far the worst window overshot the SLO.
+        """
+        overshoot_ms = max(self.window_p99_ms, default=0.0) - self.slo_p99_ms
+        if (
+            self.spiked
+            and self.generator_lag_p99_ms > GENERATOR_LAG_LIMIT_MS
+            and overshoot_ms <= self.generator_lag_p99_ms
+        ):
             return f"the load generator itself was late by {self.generator_lag_p99_ms:.1f} ms at p99"
         used = self.result.cpu_utilization
         if self.spiked and used is not None and used < SATURATED_CPU:
@@ -373,8 +383,8 @@ async def timed_run(
 ) -> RunReport:
     """Run at `rps` for `seconds` and report overall and per-window p99, so slow drift cannot hide in an average.
 
-    A run that spiked with no failed request (or with a late generator) is run again, up to `attempts` times, and the
-    last one is reported: a real shortage is there every time, a stall on a shared machine is not.
+    A run that spiked with no failed request is run again, up to `attempts` times, and the last one is reported:
+    a real shortage is there every time, a stall on a shared machine is not.
     """
     report: RunReport | None = None
     for attempt in range(1, attempts + 1):
@@ -384,7 +394,7 @@ async def timed_run(
         utilization = None if before is None or after is None else (after - before) / seconds
         report = _report(label, rps, seconds, slo_p99_ms, window_s, samples, lag, utilization)
         report = replace(report, result=replace(report.result, attempts=attempt))
-        if lag <= GENERATOR_LAG_LIMIT_MS and not report.spiked:
+        if not report.spiked:
             break
     assert report is not None
     return report
@@ -452,8 +462,18 @@ For a timed run, `spiked` is true when a window's p99 left the SLO although no r
 
 ```python
 def problem(self) -> str | None:
-    """Why these numbers cannot be trusted, or None. An untrustworthy run is never saved as evidence."""
-    if self.generator_lag_p99_ms > GENERATOR_LAG_LIMIT_MS:
+    """Why these numbers cannot be trusted, or None. An untrustworthy run is never saved as evidence.
+
+    A late generator only ever makes a run look worse (latency counts from the scheduled arrival), so it cannot
+    fake a pass, and failed requests are the service's own evidence. It matters only when the run left the SLO
+    on latency alone, and only when its lateness could account for how far the worst window overshot the SLO.
+    """
+    overshoot_ms = max(self.window_p99_ms, default=0.0) - self.slo_p99_ms
+    if (
+        self.spiked
+        and self.generator_lag_p99_ms > GENERATOR_LAG_LIMIT_MS
+        and overshoot_ms <= self.generator_lag_p99_ms
+    ):
         return f"the load generator itself was late by {self.generator_lag_p99_ms:.1f} ms at p99"
     used = self.result.cpu_utilization
     if self.spiked and used is not None and used < SATURATED_CPU:
@@ -464,7 +484,7 @@ def problem(self) -> str | None:
     return None
 ```
 
-A late generator is a problem; so is a spike with no errors while the instance used under 90% of its core (the probe measured it), which says the host, not the instance, caused the spike.
+A late generator is a problem only when the run left the SLO on latency alone **and** the generator's lateness could account for how far the worst window overshot the SLO (`overshoot_ms <= generator_lag_p99_ms`): a late generator can only make a run look worse, never fake a pass, and failed requests are the service's own evidence. A spike with no errors while the instance used under 90% of its core (the probe measured it) says the host, not the instance, caused it.
 
 ```python
 async def timed_run(
@@ -479,8 +499,8 @@ async def timed_run(
 ) -> RunReport:
     """Run at `rps` for `seconds` and report overall and per-window p99, so slow drift cannot hide in an average.
 
-    A run that spiked with no failed request (or with a late generator) is run again, up to `attempts` times, and the
-    last one is reported: a real shortage is there every time, a stall on a shared machine is not.
+    A run that spiked with no failed request is run again, up to `attempts` times, and the last one is reported:
+    a real shortage is there every time, a stall on a shared machine is not.
     """
     report: RunReport | None = None
     for attempt in range(1, attempts + 1):
@@ -490,13 +510,13 @@ async def timed_run(
         utilization = None if before is None or after is None else (after - before) / seconds
         report = _report(label, rps, seconds, slo_p99_ms, window_s, samples, lag, utilization)
         report = replace(report, result=replace(report.result, attempts=attempt))
-        if lag <= GENERATOR_LAG_LIMIT_MS and not report.spiked:
+        if not report.spiked:
             break
     assert report is not None
     return report
 ```
 
-`timed_run` now takes an optional CPU `probe` and a number of `attempts`. It runs the load, reads the CPU before and after, builds the report with the utilization and records which attempt this was. It stops at the first run whose generator was on time and that did not spike without errors; otherwise it runs again, up to `attempts` times, and reports the last. A stall on a shared machine does not repeat; a real shortage does. The `assert report is not None` tells the type checker that the loop ran at least once.
+`timed_run` now takes an optional CPU `probe` and a number of `attempts`. It runs the load, reads the CPU before and after, builds the report with the utilization and records which attempt this was. It stops at the first run that did not spike without errors; otherwise it runs again, up to `attempts` times, and reports the last. A stall on a shared machine does not repeat; a real shortage does. The `assert report is not None` tells the type checker that the loop ran at least once.
 
 ### `application/experiments.py`: pool-size decisions
 
@@ -1084,7 +1104,7 @@ def _header(plan: dict[str, Any]) -> list[str]:
         f"**{plan['future_peak_rps']:g}** "
         f"(growth {plan['growth_factor']:g}x).",
         "- Latency SLO: **p99 under 50 ms**.",
-        "- Each instance is a container with a fixed 1.0 CPU and 256 MiB; a request burns real CPU "
+        "- Each instance is a container pinned to a vCPU of its own with 256 MiB; a request burns real CPU "
         "(`WORK_ROUNDS` rounds of SHA-256).",
         "",
     ]

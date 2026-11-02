@@ -13,7 +13,7 @@ export STEP_SECONDS ?= 10
 export SOAK_SECONDS ?= 120
 CHECK_SECONDS ?= 40
 
-.PHONY: help install preflight clean-evidence set-fleet up reset-fleet run knee soak plan plan-doc full-fleet zone-loss pool-sweep dependency-test rollout-test restore-test review test-measurements \
+.PHONY: help install preflight clean-evidence set-fleet confirm-plan up reset-fleet run knee soak plan plan-doc full-fleet zone-loss pool-sweep dependency-test rollout-test restore-test review test-measurements \
         psql rules rules-check lint format test test-unit test-rules test-integration test-e2e audit check lock docker-build down clean
 
 help: ## list the targets
@@ -45,7 +45,7 @@ reset-fleet: ## recreate every instance without the shared dependency, at versio
 
 # The whole story, in the lesson's order: the knee, the safe load, the plan, the fleet and its lost zone, the next
 # bottleneck, the failures the review needs evidence for, and the review.
-run: preflight clean-evidence up reset-fleet knee soak plan set-fleet full-fleet zone-loss pool-sweep dependency-test rollout-test restore-test plan-doc review test-measurements ## the whole capacity and readiness exercise (about 20 minutes on a quiet machine)
+run: preflight clean-evidence up reset-fleet knee soak plan set-fleet full-fleet zone-loss confirm-plan pool-sweep dependency-test rollout-test restore-test plan-doc review test-measurements ## the whole capacity and readiness exercise (about 20 minutes on a quiet machine)
 
 knee: $(STAMP) ## step the load up on one instance until p99 climbs; names the saturated resource (STEP_SECONDS per step)
 	mkdir -p $(EVIDENCE)
@@ -60,8 +60,12 @@ soak: $(STAMP) ## hold one instance at the safe load for SOAK_SECONDS and check 
 	  || { rm -f $(EVIDENCE)/soak.json.tmp; exit 1; }
 	mv $(EVIDENCE)/soak.json.tmp $(EVIDENCE)/soak.json
 	@cat $(EVIDENCE)/soak.json
+	@$(PY) -c "import json,sys; d=json.load(open('$(EVIDENCE)/soak.json')); sys.exit(0 if d['within_slo'] else 'the soak at the safe load left the SLO: the safe load is not safe')"
 
 plan: $(STAMP) ## size the fleet from the measured safe load: the formula, the inputs, the result
+	$(VENV)/bin/capacity plan
+
+confirm-plan: $(STAMP) ## size the fleet again now that the lost-zone run exists, so the plan records that it was confirmed
 	$(VENV)/bin/capacity plan
 
 full-fleet: $(STAMP) ## run the projected peak (2,000 rps) on the planned fleet, no shared dependency yet

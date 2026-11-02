@@ -57,7 +57,7 @@ scrape_configs:
         labels: {zone: c}
   - job_name: ledger
     static_configs:
-      - targets: ["ledger:9102"]
+      - targets: ["ledger:9102", "ledger:9103"]
 ```
 
 - The comment at the top says the demo-window rules are not loaded: evaluating them every second would compete with the load tests for CPU.
@@ -72,6 +72,7 @@ prometheus:
   image: prom/prometheus:v3.5.0
   restart: unless-stopped
   cpus: 0.5
+  cpuset: "9-11"
   command:
     - --config.file=/etc/prometheus/prometheus.yml
     - --storage.tsdb.retention.time=1d

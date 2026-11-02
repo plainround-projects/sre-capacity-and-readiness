@@ -430,6 +430,11 @@ class TestRunsThatSpikeWithoutErrors:
             samples, lag = await super().run(rps, duration_s)
             return [Sample(s.scheduled_s, 0.3, True) for s in samples], lag
 
+    class BarelySlow(FakeRunner):
+        async def run(self, rps, duration_s):
+            samples, lag = await super().run(rps, duration_s)
+            return [Sample(s.scheduled_s, 0.055, True) for s in samples], lag
+
     class IdleCore:
         async def cpu_seconds(self):
             return 0.0
@@ -453,10 +458,20 @@ class TestRunsThatSpikeWithoutErrors:
         assert not report.within_slo
         assert report.problem is None
 
-    async def test_a_late_generator_makes_a_run_untrustworthy(self):
-        report = await timed_run(FakeRunner(lag_ms=40.0), "soak", 100, 5, slo_p99_ms=50, window_s=5)
+    async def test_a_spike_a_late_generator_could_explain_is_untrustworthy(self):
+        report = await timed_run(self.BarelySlow(lag_ms=40.0), "soak", 100, 5, slo_p99_ms=50, window_s=5)
         assert report.problem is not None
         assert "late" in report.problem
+
+    async def test_a_spike_far_beyond_the_generators_lateness_is_the_services(self):
+        report = await timed_run(self.AlwaysSpikes(lag_ms=9.0), "fleet", 100, 5, slo_p99_ms=50, window_s=5)
+        assert not report.within_slo
+        assert report.problem is None
+
+    async def test_a_late_generator_cannot_fake_a_pass(self):
+        report = await timed_run(FakeRunner(lag_ms=40.0), "soak", 100, 5, slo_p99_ms=50, window_s=5)
+        assert report.within_slo
+        assert report.problem is None
 
     async def test_a_knee_without_cpu_at_its_limit_is_not_trustworthy(self):
         report = await knee_test(FakeRunner(knee=500), None, [100, 200, 300, 400, 500, 600, 700], step_seconds=1)
@@ -1281,6 +1296,27 @@ class TestFleetFiles:
 
 For a plan that needs 3 instances for the peak of 5 in all, the rule thresholds are `< 3` and `< 5`, and the promtool replay holds 5 for 9 samples, 3 for 39 and 5 for 30, and 2 (one fewer than needed) in the paging case. `fleet_instances((3, 3, 2))` ends at `app-c2`; the spare of that fleet is `app-c3`; a fleet of 2, 2 and 1 leaves four spares.
 
+`TestLedgerWorkers` covers the worker split:
+
+```python
+class TestLedgerWorkers:
+    def test_the_pool_is_split_between_workers_without_losing_a_connection(self):
+        from capacity.interfaces.ledger_app import pool_share
+
+        assert [pool_share(40, 2, index) for index in range(2)] == [20, 20]
+        assert [pool_share(25, 2, index) for index in range(2)] == [13, 12]
+        assert sum(pool_share(37, 3, index) for index in range(3)) == 37
+
+    def test_the_ledger_runs_one_worker_unless_told_otherwise(self):
+        base = {"DATABASE_URL": "postgresql://u:p@db/x"}
+        assert LedgerSettings.from_env(base).workers == 1
+        assert LedgerSettings.from_env({**base, "WORKERS": "2"}).workers == 2
+        with pytest.raises(SettingsError, match="WORKERS"):
+            LedgerSettings.from_env({**base, "WORKERS": "0"})
+```
+
+`pool_share` gives 20 and 20 for a pool of 40 over two workers, 13 and 12 for 25, and always sums to the total (37 over three). The ledger runs one worker unless `WORKERS` says otherwise, and `WORKERS=0` is refused with a message naming the variable.
+
 ### `tests/unit/test_evidence.py`
 
 ```python
@@ -1604,6 +1640,73 @@ def test_cpu_work_costs_real_time_that_grows_with_the_rounds():
 ```
 
 `TestOpenLoopRunner`: at 200 requests a second for one second the runner sends exactly 200 requests, all succeed, and the generator lag is not negative. The queuing test is the key one: a server that handles one request at a time (an `asyncio.Lock` around a 20 ms sleep) can serve 50 a second, so 100 a second makes later arrivals queue, and because latency runs from the scheduled arrival the slowest request is over 0.3 seconds; a closed-loop generator would not show it. A dead port gives errors, not an exception. The knee test runs end to end against a real instance (four steps, each with requests), and a timed run reports two windows within a generous SLO. The last test shows `cpu_work(40_000)` takes longer than `cpu_work(2000)`.
+
+Two more tests cover the drain and the backlog:
+
+```python
+async def test_a_service_that_never_answers_cannot_swamp_the_generator():
+    """Past the backlog, scheduled requests count as failed at once instead of piling up as tasks."""
+
+    async def never(_):
+        await asyncio.sleep(30)
+
+    app = web.Application()
+    app.router.add_get("/work", never)
+    server = await start(app)
+    runner = RawOpenLoopRunner("127.0.0.1", server.port, max_connections=2, timeout_s=1.0)
+    try:
+        samples, _ = await runner.run(rps=200, duration_s=0.5)
+    finally:
+        await runner.close()
+        await server.close()
+    assert len(samples) == 100
+    assert not any(sample.ok for sample in samples)
+    assert sum(sample.latency_s < 0.1 for sample in samples) > 80  # shed at once, not after the 1 second timeout
+```
+
+A server that never answers, with `max_connections=2` (so a backlog of 4), receives 200 requests a second for half a second: 100 are scheduled, none succeed, and more than 80 of them fail at once (latency under 0.1 s) instead of after the 1 second timeout, so the generator never piles up tasks.
+
+```python
+async def test_a_draining_instance_says_so_on_its_health_check_and_keeps_serving():
+    """On a stop the process first fails /healthz, so the load balancer drains it, and only then closes."""
+    draining = {"now": False}
+    metrics = InstanceMetrics("b", "b2")
+    server = await start(instance_app.build_app(settings(), metrics))
+    ops = await start(build_ops_app(metrics.render, is_draining=lambda: draining["now"]))
+    try:
+        assert (await get(f"http://127.0.0.1:{ops.port}/healthz"))[0] == 200
+        draining["now"] = True
+        status, _, body = await get(f"http://127.0.0.1:{ops.port}/healthz")
+        assert (status, '"draining"' in body) == (503, True)
+        assert (await get(f"http://127.0.0.1:{server.port}/work"))[0] == 200
+    finally:
+        await server.close()
+        await ops.close()
+```
+
+With a mutable flag standing in for the process state, `/healthz` answers 200 before and 503 `draining` after the flag flips, while `/work` still answers 200 (a draining instance keeps serving). The next test calls `serve` with a stop event and a 0.2 second drain, and checks that `on_drain` ran once and that stopping took at least the drain time.
+
+The drain test of `serve` in full:
+
+```python
+async def test_serve_marks_the_process_draining_before_it_stops():
+    from capacity.infrastructure.http_runtime import serve
+
+    events: list[str] = []
+    stop = asyncio.Event()
+    app = web.Application()
+    task = asyncio.create_task(
+        serve([(app, 0)], stop=stop, drain_s=0.2, on_drain=lambda: events.append("drain"), host="127.0.0.1")
+    )
+    await asyncio.sleep(0.2)
+    started = time.perf_counter()
+    stop.set()
+    await task
+    assert events == ["drain"]
+    assert time.perf_counter() - started >= 0.2
+```
+
+`serve` runs as a task with port 0 (any free port) and a stop event. After a short wait the test records the time, sets the event, waits for `serve` to return, and checks the order of events and that at least the 0.2 second drain passed.
 
 ### `tests/integration/test_cli_and_adapters.py`
 

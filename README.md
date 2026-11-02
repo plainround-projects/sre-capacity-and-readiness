@@ -59,17 +59,22 @@ restore:    28,467 rows backed up (332,518 bytes, 2.0 s), restored into a scratc
 
 The knee, soak, plan, fleet and pool-sweep experiments need roughly four free cores for about 20 minutes. The machine this repository was built on was running dozens of other containers at a load average above 200 during the whole build window (open-loop generator lag of up to 145 seconds, soak p99 of 6 seconds at 300 requests a second), so every attempt produced numbers that described the machine, not the service, and none was committed. `docs/capacity-plan.md` and `docs/launch-decision.md` are generated from that evidence and are therefore not in the repository either: `make run` writes them. Until it has been run, `make review` reports exactly that (restore verified, the load evidence missing) rather than a launch decision (today it says DON'T LAUNCH YET: rollout and capacity have no evidence, backup and restore pass), and `make test-measurements` fails with a missing-evidence message until `make run` has been run; it is not part of `make test`.
 
-**Verification run of 2026-11-02 (shared machine, load average 9 to 30 from other work).** `make up` built and started the stack (12 containers healthy). `make test` passed (173 tests) and the promtool replays passed. `make test-e2e` passed 4 of 5; the failing one, `test_the_load_balancer_sees_eight_healthy_instances`, saw 15 healthy members. Two attempts at `make run` reached the soak and stopped there:
+**Verification of 2026-11-02 (what was run, what was found, what is still pending).** `make up`, `make test` (191 tests, promtool replays) and `make lint` pass. The complete `make run` has not yet finished in one piece, so no measured evidence is committed beyond the two load-independent experiments above and `docs/capacity-plan.md` and `docs/launch-decision.md` are still not generated. The work of this date found and fixed the reasons earlier runs were invalid or failed, one at a time, each by measuring it:
 
-```text
-knee:  500 rps (p99 4.4 ms -> 17.6 ms), CPU of the one core only 49.5% at the knee, so the resource is reported as unknown, not CPU
-soak:  375 rps for 120 s, 0 errors, but window p99 up to 174 ms (and 884 ms in the first attempt): not within the 50 ms SLO
-plan:  ceil(2000 / 375) = 6 for the peak, 9 in all, but docker-compose.yml defines 8, so `make plan` stops and asks for more instances
-```
+| Found | Proof | Fix |
+| --- | --- | --- |
+| Envoy kept removed addresses as members (13 and 15 healthy for 8 instances), so zone loss waited forever | `/clusters` showed `pending_dynamic_removal` hosts | `ignore_health_on_host_removal: true`; `healthy_members()` counts only healthy hosts |
+| The knee fired at 70% of the core, run after run | the cgroup counters: `nr_throttled` rose in 8 of 103 periods at 73% use (a `cpus: 1.0` quota throttles in bursts) | each instance pinned to a vCPU of its own with `cpuset` |
+| Two of every five 2-second windows spiked 30 to 70 ms | the container healthcheck started a Python interpreter on the instance's core every 5 seconds | a bash `/dev/tcp` healthcheck; windows became flat (4.3 ms at 300 rps) |
+| The shared ledger saturated a core near 1,750 rps, below the 2,000 rps peak, and the generator fell behind in a collapse | `docker stats`: 57% of a core at 1,000 rps; generator 126 ms late with thousands of waiting tasks | the ledger runs two workers on uvloop; the generator caps its backlog and counts requests beyond it as failed; `synchronous_commit=off` on the ledger database |
+| A rolling restart cost 3,948 requests | Envoy `upstream_rq_retry_overflow` rose by exactly the failed count (default budget of 3 concurrent retries) | `max_retries: 1000`, and an instance drains (`/healthz` 503, keeps serving for 3 s) before it stops: 0 failed requests in four restarts under 1,000 rps |
+| `make plan` stopped the run when the measured safe load needed more than 8 instances | the plan wanted 9 | nine instances defined, `make set-fleet` runs the number the plan names, the fleet alert thresholds are generated from the plan |
 
-These numbers describe a loaded Docker VM, not the service: the instance never used a full core before latency rose, and the generator's other steps were noisy. They were not committed (`docs/evidence` holds only the dependency and restore evidence), and `docs/capacity-plan.md` and `docs/launch-decision.md` are still not generated. An earlier attempt got past the full-fleet run and failed in `make zone-loss`: after the instances were recreated, Envoy kept the removed addresses as members while they still passed health checks (`pending_dynamic_removal` in <http://localhost:47281/clusters>), so `cluster.app.membership_healthy` read 13 for 8 instances and `wait_for_members` timed out. That also inflates the fleet alerts. Setting `ignore_health_on_host_removal: true` on the `app` cluster in `deploy/envoy.yaml` is the likely fix, but it could not be confirmed here (Envoy's health checks timed out under the load), so it is not applied.
+Stage results seen on this date, from separate runs (not yet one coherent run): knee at 600 rps with 102% of the core in use (so the resource is reported as CPU), safe load 450 rps, a 120-second soak at 450 rps with p99 5.3 ms and 0 errors, a plan of 5 instances for the peak and 8 in all (3/3/2), 2,000 rps on all 8 with p99 6.5 ms, and 2,000 rps on the 5 survivors of a lost zone with p99 21.5 ms and 0 errors; the pool sweep chose the smallest size that held, then added 25%; the dependency-freeze and restore checks passed.
 
-Pending capacity: on a quiet machine run `make down && make run`, then `make test`, `make test-e2e` and `make test-measurements`; confirm the member count after `make reset-fleet` first and apply the Envoy change if it reads above 8.
+The last complete attempt stopped at the knee: the guard discarded all three knee attempts (the load generator 12 to 13 ms late, then "p99 rose at 450 rps with 83% of the core in use, so the host, not the instance, ran short of something") and wrote no evidence, because the host's one-minute load went from 6 at the preflight to 22 and then 40 while a host `node` process used a whole CPU. That is the guard working, not a defect.
+
+Pending capacity: on a quiet machine run `make down && make run` (about 25 minutes), then `make test`, `make test-e2e` and `make test-measurements`, and replace this section with the dated numbers.
 
 ## Done when: the lesson's checklist and the proof for each line
 
@@ -94,7 +99,7 @@ A load test is only as honest as its generator. `capacity-loadtest` is open-loop
 
 | Stretch (from the lesson) | Built? |
 | --- | --- |
-| Repeat the knee test with a larger instance size and decide whether to scale up or out. | No. `cpus` in `docker-compose.yml` is the knob; a Python event loop uses one core, so more than 1.0 CPU would not raise an instance's capacity, which is itself the answer for this runtime. |
+| Repeat the knee test with a larger instance size and decide whether to scale up or out. | No. `cpuset` in `docker-compose.yml` pins each instance to one vCPU; a Python event loop uses one core, so a second core would not raise an instance's capacity, which is itself the answer for this runtime. |
 | Add autoscaling and test how fast it reacts to a step from half to full peak. | No, and recorded as an accepted risk in the review (`readiness/checklist.yaml`) with the condition that reopens it. |
 | Model cost per thousand requests at the planned size and at twice the size. | No. The plan gives instances (and the pool); multiply by the price of one instance. |
 

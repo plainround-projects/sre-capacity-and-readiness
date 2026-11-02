@@ -74,7 +74,7 @@ def markdown(items: list[ReviewItem], decision: Decision) -> str:
 ## What is known
 
 <!-- measured -->
-Run `make run` to measure this: the numbers are written here from `docs/evidence`.
+The fleet is **8** instances over three zones (3/3/2). Losing the largest zone leaves **5**, and 5 instances at 450 requests a second carry the projected peak of 2000. `FleetBelowPeakCapacity` pages below **5** healthy instances and `FleetBelowFullStrength` opens a ticket below **8**.
 <!-- /measured -->
 
 This was run, not assumed: `make zone-loss` stops the largest zone and runs the projected peak on the survivors

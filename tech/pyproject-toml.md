@@ -49,6 +49,7 @@ dependencies = [
     "PyYAML==6.0.2",
     "psycopg[binary]==3.2.9",
     "psycopg-pool==3.2.6",
+    "uvloop==0.21.0",
 ]
 ```
 

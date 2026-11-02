@@ -87,3 +87,19 @@ class TestFleetFiles:
         assert fleet_instances((3, 3, 2))[-1] == "app-c2"
         assert spare_instances((3, 3, 2)) == ["app-c3"]
         assert len(spare_instances((2, 2, 1))) == 4
+
+
+class TestLedgerWorkers:
+    def test_the_pool_is_split_between_workers_without_losing_a_connection(self):
+        from capacity.interfaces.ledger_app import pool_share
+
+        assert [pool_share(40, 2, index) for index in range(2)] == [20, 20]
+        assert [pool_share(25, 2, index) for index in range(2)] == [13, 12]
+        assert sum(pool_share(37, 3, index) for index in range(3)) == 37
+
+    def test_the_ledger_runs_one_worker_unless_told_otherwise(self):
+        base = {"DATABASE_URL": "postgresql://u:p@db/x"}
+        assert LedgerSettings.from_env(base).workers == 1
+        assert LedgerSettings.from_env({**base, "WORKERS": "2"}).workers == 2
+        with pytest.raises(SettingsError, match="WORKERS"):
+            LedgerSettings.from_env({**base, "WORKERS": "0"})

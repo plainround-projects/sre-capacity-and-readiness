@@ -64,7 +64,8 @@ async def run(settings: LedgerSettings) -> None:
             [
                 (build_app(pool, metrics, settings.hold_ms / 1000.0), settings.port),
                 (build_ops_app(metrics.render, ready), settings.ops_port),
-            ]
+            ],
+            reuse_port=settings.workers > 1,
         )
     finally:
         await pool.close()
@@ -123,6 +124,7 @@ class LedgerSettings:
     port: int
     ops_port: int
     log_level: str
+    workers: int = 1
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> LedgerSettings:
@@ -138,6 +140,7 @@ class LedgerSettings:
             port=_port(env, "PORT", 8082),
             ops_port=_port(env, "OPS_PORT", 9102),
             log_level=_text(env, "LOG_LEVEL", "INFO").upper(),
+            workers=int(_number(env, "WORKERS", 1, 1, 8)),
         )
 ```
 

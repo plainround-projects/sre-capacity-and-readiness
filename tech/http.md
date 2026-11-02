@@ -49,11 +49,15 @@ class RawOpenLoopRunner:
     def __init__(
         self, host: str, port: int, path: str = "/work", max_connections: int = 512, timeout_s: float = 5.0
     ) -> None:
-        """`max_connections` bounds requests in flight; a request that waits for a connection still counts that wait."""
+        """`max_connections` bounds requests in flight; a request that waits for a connection still counts that wait.
+
+        Twice that many requests may be outstanding; beyond it a scheduled request is counted as failed at once.
+        """
         self._host = host
         self._port = port
         self._request = f"GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: capacity-loadtest\r\n\r\n".encode()
         self._limit = asyncio.Semaphore(max_connections)
+        self._backlog = 2 * max_connections
         self._timeout_s = timeout_s
         self._idle: deque[_Connection] = deque()
 ```

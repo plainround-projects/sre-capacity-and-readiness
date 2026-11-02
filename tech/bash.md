@@ -58,6 +58,11 @@ SQL
 ```yaml
 db:
   image: postgres:18
+  cpuset: "9-11"
+  # The ledger writes an entry per request, 2,000 times a second at the projected peak. Waiting for a disk flush on
+  # every commit stalled requests for 100 to 400 ms on a laptop's virtual disk and hid the pool; the entries are
+  # test data, so a commit may return before its flush.
+  command: ["postgres", "-c", "synchronous_commit=off"]
   restart: unless-stopped
   environment:
     POSTGRES_DB: ledger

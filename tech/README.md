@@ -8,6 +8,7 @@ This folder teaches every technology used in `sre-capacity-and-readiness`, from 
 | --- | --- |
 | [python.md](python.md) | The language: dataclasses, enums, the CPU work, the knee search, the plan formula, `subprocess`, `argparse`. |
 | [asyncio.md](asyncio.md) | The open-loop load generator, the instance that does CPU work on the event loop, and the async ledger. |
+| [uvloop.md](uvloop.md) | The faster event loop under the instance, the ledger and the load generator. |
 | [python-domain-layer.md](python-domain-layer.md) | Every file of `domain/`: CPU work, latency, knee, plan, readiness, telemetry, SLO formulas. |
 | [python-application-layer.md](python-application-layer.md) | Every file of `application/`: ports, load tests, SLI counting, alert replay, rule generation, the report and the review. |
 | [python-infrastructure-layer.md](python-infrastructure-layer.md) | Every file of `infrastructure/`: settings, logging, metrics, the open-loop generator, Docker Compose, files. |
@@ -47,7 +48,7 @@ This folder teaches every technology used in `sre-capacity-and-readiness`, from 
 
 ## Suggested reading order
 
-1. Language and concurrency: `python.md`, `asyncio.md`, then the code itself layer by layer: `python-domain-layer.md`, `python-application-layer.md`, `python-infrastructure-layer.md`, `python-interfaces-layer.md`.
+1. Language and concurrency: `python.md`, `asyncio.md`, `uvloop.md`, then the code itself layer by layer: `python-domain-layer.md`, `python-application-layer.md`, `python-infrastructure-layer.md`, `python-interfaces-layer.md`.
 2. Web pieces: `http.md`, `aiohttp.md`, `json.md`, `python-logging.md`, `regex.md`.
 3. Data: `sql.md`, `postgresql.md`, `psycopg.md`, `bash.md`.
 4. The fleet and its edge: `docker.md`, `docker-compose.md`, `envoy.md`.

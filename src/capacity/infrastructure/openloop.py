@@ -29,11 +29,15 @@ class RawOpenLoopRunner:
     def __init__(
         self, host: str, port: int, path: str = "/work", max_connections: int = 512, timeout_s: float = 5.0
     ) -> None:
-        """`max_connections` bounds requests in flight; a request that waits for a connection still counts that wait."""
+        """`max_connections` bounds requests in flight; a request that waits for a connection still counts that wait.
+
+        Twice that many requests may be outstanding; beyond it a scheduled request is counted as failed at once.
+        """
         self._host = host
         self._port = port
         self._request = f"GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: capacity-loadtest\r\n\r\n".encode()
         self._limit = asyncio.Semaphore(max_connections)
+        self._backlog = 2 * max_connections
         self._timeout_s = timeout_s
         self._idle: deque[_Connection] = deque()
 
@@ -57,9 +61,14 @@ class RawOpenLoopRunner:
             while index < due:
                 scheduled = start + index / rps
                 lags.append(now - scheduled)
-                task = loop.create_task(one(scheduled))
-                tasks.add(task)
-                task.add_done_callback(tasks.discard)
+                if len(tasks) >= self._backlog:
+                    # The service is so far behind that requests are piling up unsent. Count the request as failed
+                    # now instead of queueing a task for it: thousands of waiting tasks would slow the generator itself.
+                    samples.append(Sample(scheduled - start, loop.time() - scheduled, False))
+                else:
+                    task = loop.create_task(one(scheduled))
+                    tasks.add(task)
+                    task.add_done_callback(tasks.discard)
                 index += 1
             await asyncio.sleep(max(0.0005, start + index / rps - loop.time()))
         if tasks:

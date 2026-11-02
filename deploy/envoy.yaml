@@ -52,6 +52,9 @@ static_resources:
           - max_connections: 4096
             max_pending_requests: 4096
             max_requests: 4096
+            # Envoy allows only 3 retries in flight by default. When an instance stops, every request that was headed for
+            # it is retried at once, so a rolling restart at 1,000 requests a second overflowed that budget into 503s.
+            max_retries: 1000
       health_checks:
         - timeout: 1s
           interval: 1s

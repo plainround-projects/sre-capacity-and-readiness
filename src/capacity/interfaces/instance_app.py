@@ -10,6 +10,7 @@ import time
 from collections.abc import AsyncIterator
 
 import aiohttp
+import uvloop
 from aiohttp import web
 
 from capacity.domain.cpu import cpu_work
@@ -81,11 +82,21 @@ def build_app(settings: InstanceSettings, metrics: InstanceMetrics) -> web.Appli
 async def run(settings: InstanceSettings) -> None:
     """Build from settings and serve until told to stop; in-flight requests finish before the process exits."""
     metrics = InstanceMetrics(settings.zone, settings.instance)
-    await serve([(build_app(settings, metrics), settings.port), (build_ops_app(metrics.render), settings.ops_port)])
+    draining = {"now": False}
+    await serve(
+        [
+            (build_app(settings, metrics), settings.port),
+            (build_ops_app(metrics.render, is_draining=lambda: draining["now"]), settings.ops_port),
+        ],
+        drain_s=settings.drain_s,
+        on_drain=lambda: draining.update(now=True),
+    )
 
 
 def main() -> None:
     """Entry point of `capacity-instance`."""
     settings = InstanceSettings.from_env(os.environ)
     configure_logging(settings.log_level)
-    asyncio.run(run(settings))
+    # uvloop cuts the cost of everything around the CPU work (the server, and the call to the ledger). The CPU work
+    # itself is unchanged, so the instance still saturates its core where the load test finds it.
+    asyncio.run(run(settings), loop_factory=uvloop.new_event_loop)

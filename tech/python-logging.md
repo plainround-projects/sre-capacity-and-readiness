@@ -80,6 +80,10 @@ def configure_logging(level: str) -> None:
 ```python
     log.info("listening", extra={"port": port})
 await stop.wait()
+log.info("draining", extra={"seconds": drain_s})
+if on_drain is not None:
+    on_drain()
+await asyncio.sleep(drain_s)
 log.info("shutting down")
 ```
 

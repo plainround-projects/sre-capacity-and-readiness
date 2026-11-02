@@ -175,6 +175,11 @@ class TestRunsThatSpikeWithoutErrors:
             samples, lag = await super().run(rps, duration_s)
             return [Sample(s.scheduled_s, 0.3, True) for s in samples], lag
 
+    class BarelySlow(FakeRunner):
+        async def run(self, rps, duration_s):
+            samples, lag = await super().run(rps, duration_s)
+            return [Sample(s.scheduled_s, 0.055, True) for s in samples], lag
+
     class IdleCore:
         async def cpu_seconds(self):
             return 0.0
@@ -198,10 +203,20 @@ class TestRunsThatSpikeWithoutErrors:
         assert not report.within_slo
         assert report.problem is None
 
-    async def test_a_late_generator_makes_a_run_untrustworthy(self):
-        report = await timed_run(FakeRunner(lag_ms=40.0), "soak", 100, 5, slo_p99_ms=50, window_s=5)
+    async def test_a_spike_a_late_generator_could_explain_is_untrustworthy(self):
+        report = await timed_run(self.BarelySlow(lag_ms=40.0), "soak", 100, 5, slo_p99_ms=50, window_s=5)
         assert report.problem is not None
         assert "late" in report.problem
+
+    async def test_a_spike_far_beyond_the_generators_lateness_is_the_services(self):
+        report = await timed_run(self.AlwaysSpikes(lag_ms=9.0), "fleet", 100, 5, slo_p99_ms=50, window_s=5)
+        assert not report.within_slo
+        assert report.problem is None
+
+    async def test_a_late_generator_cannot_fake_a_pass(self):
+        report = await timed_run(FakeRunner(lag_ms=40.0), "soak", 100, 5, slo_p99_ms=50, window_s=5)
+        assert report.within_slo
+        assert report.problem is None
 
     async def test_a_knee_without_cpu_at_its_limit_is_not_trustworthy(self):
         report = await knee_test(FakeRunner(knee=500), None, [100, 200, 300, 400, 500, 600, 700], step_seconds=1)
