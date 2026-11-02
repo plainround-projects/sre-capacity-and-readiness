@@ -300,7 +300,7 @@ def test_step_two_the_safe_load_is_a_stated_margin_below_the_knee_and_held_for_t
     assert soak["within_slo"] is True
 ```
 
-These tests read the committed evidence and assert the lesson's Done when lines: the knee was found and CPU saturated first; the safe load is a stated margin below the knee and held for the whole soak; the planned fleet minus a zone held the projected peak, and so on. They are marked `measurements` and excluded from `make test` (`-m 'not measurements'`) because they fail when the evidence is missing or was taken on a contended machine; run them with `make test-measurements` after `make run`. The docstring says so.
+These tests read the committed evidence and assert the lesson's Done when lines: the knee was found and CPU saturated first; the safe load is a stated margin below the knee and held for the whole soak; the planned fleet minus a zone held the projected peak; the next bottleneck is the shared connection pool and the plan names its size; a rolling restart and a rollback under load cost no request; and a frozen dependency fails requests fast while the instance stays healthy. They are marked `measurements` and excluded from `make test` (`-m 'not measurements'`) because they fail when the evidence is missing or was taken on a contended machine; run them with `make test-measurements` after `make run`. The docstring says so.
 
 ### Coverage gate
 
