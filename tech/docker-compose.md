@@ -6,13 +6,13 @@ Docker Compose is a tool, built into the `docker` command as `docker compose`, t
 
 ## Why this repository uses it
 
-A capacity test needs a stable thing to measure. Compose gives each of the eight service instances a fixed **1.0 CPU** and **256 MiB** of memory, so "the capacity of one instance" is a number that does not depend on what else runs on the machine. Compose also wires the whole fleet: Envoy in front, a shared ledger and PostgreSQL behind, Prometheus watching, and a load generator that runs inside the same network so a laptop's port forwarding is not part of the measurement. The experiments also use Compose commands to stop a zone, freeze the ledger and replace instances one by one.
+A capacity test needs a stable thing to measure. Compose gives each of the nine service instances a fixed **1.0 CPU** and **256 MiB** of memory, so "the capacity of one instance" is a number that does not depend on what else runs on the machine. Compose also wires the whole fleet: Envoy in front, a shared ledger and PostgreSQL behind, Prometheus watching, and a load generator that runs inside the same network so a laptop's port forwarding is not part of the measurement. The experiments also use Compose commands to stop a zone, freeze the ledger and replace instances one by one.
 
 ## Where it appears
 
 | File | What it does with Compose |
 | --- | --- |
-| `docker-compose.yml` | Defines `app-a1` ... `app-c2` (eight instances), `lb` (Envoy), `db`, `ledger`, `prometheus` and `loadtest` (a tool service). |
+| `docker-compose.yml` | Defines `app-a1` ... `app-c3` (nine instances, of which the plan says how many run), `lb` (Envoy), `db`, `ledger`, `prometheus` and `loadtest` (a tool service). |
 | `Makefile` | `up`, `reset-fleet`, `LOADTEST := docker compose run --rm -T loadtest`, `psql`, `down`. |
 | `src/capacity/infrastructure/compose.py` | Python wrapper that runs `docker compose` for the experiments: recreate, stop, start, pause, unpause, exec, run. |
 | `.env.example`, `.env` | Provide values for the `${NAME:-default}` placeholders. |
@@ -32,7 +32,7 @@ A capacity test needs a stable thing to measure. Compose gives each of the eight
 ### The shared instance block
 
 ```yaml
-# The fleet: 8 instances in 3 zones (3/3/2) behind an Envoy load balancer, a shared ledger with a bounded pool, and
+# The fleet: up to 9 instances in 3 zones (3/3/3), of which the capacity plan says how many run, behind an Envoy load balancer, a shared ledger with a bounded pool, and
 # PostgreSQL behind it. Every instance is a container with a fixed 1.0 CPU and 256 MiB limit, so one instance's
 # capacity is a stable number. Prometheus scrapes Envoy (the edge) and every instance.
 name: sre-capacity-and-readiness
@@ -57,7 +57,7 @@ x-instance: &instance
     start_period: 10s
 
 x-instance-env: &instance-env
-  WORK_ROUNDS: ${WORK_ROUNDS:-3000}
+  WORK_ROUNDS: ${WORK_ROUNDS:-6000}
   # Empty means no shared dependency: the first tests find the CPU knee on its own. `make run` sets it for the pool tests.
   LEDGER_URL: ${LEDGER_URL:-}
   LEDGER_TIMEOUT_S: ${LEDGER_TIMEOUT_S:-0.5}
@@ -65,7 +65,7 @@ x-instance-env: &instance-env
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
 ```
 
-- The leading comment states the design: eight instances in three zones (3/3/2), Envoy in front, a shared ledger with a bounded pool, PostgreSQL, fixed CPU and memory limits so capacity is a stable number.
+- The leading comment states the design: up to nine instances in three zones (3/3/3), of which the capacity plan says how many run, Envoy in front, a shared ledger with a bounded pool, PostgreSQL, fixed CPU and memory limits so capacity is a stable number.
 - `x-instance: &instance` is an **extension field** (ignored by Compose; a place to write settings once) with a YAML **anchor** `&instance`. `<<: *instance` in each service merges it in (see the YAML note).
 - `build: .` and `image: sre-capacity-and-readiness:dev` build the one image; `command: ["capacity-instance"]` starts an instance.
 - `restart: unless-stopped`, `read_only: true`, `security_opt: ["no-new-privileges:true"]`, `cap_drop: ["ALL"]` and `tmpfs: ["/tmp"]` are the hardening settings explained in the Docker notes of this track: restart after a crash, a read-only root file system with a memory-backed `/tmp`, no privilege gain, no Linux capabilities.
@@ -74,7 +74,7 @@ x-instance-env: &instance-env
 - `healthcheck` runs a Python one-liner that opens `http://localhost:9101/healthz` and fails if it cannot (`interval: 5s`, `timeout: 15s`, `retries: 40`, `start_period: 10s`; generous because the build machine was often busy).
 - `x-instance-env: &instance-env` holds the environment shared by every instance: `WORK_ROUNDS` (how many SHA-256 rounds each request burns, default 3000), `LEDGER_URL` (empty means no shared dependency), `LEDGER_TIMEOUT_S`, `VERSION` (`${APP_VERSION:-v1}`, how the rollout test tells releases apart) and `LOG_LEVEL`.
 
-### The eight instances
+### The nine instances
 
 ```yaml
 services:
@@ -131,6 +131,8 @@ lb:
     app-c1:
       condition: service_healthy
     app-c2:
+      condition: service_healthy
+    app-c3:
       condition: service_healthy
   healthcheck:
     test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9901 && printf 'GET /ready HTTP/1.1\\r\\nHost: lb\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q LIVE <&3"]
@@ -327,7 +329,7 @@ class Compose:
 
 ### The remaining instances: zones b and c
 
-Zone A's instances `app-a2` and `app-a3` are written exactly like `app-a1` without the published host ports. The other five instances repeat the same pattern:
+Zone A's instances `app-a2` and `app-a3` are written exactly like `app-a1` without the published host ports. The other six instances (`app-b1` to `app-b3` and `app-c1` to `app-c3`) repeat the same pattern:
 
 ```yaml
 app-b1:
@@ -360,16 +362,22 @@ app-c2:
     <<: *instance-env
     ZONE: c
     INSTANCE: c2
+app-c3:
+  <<: *instance
+  environment:
+    <<: *instance-env
+    ZONE: c
+    INSTANCE: c3
 ```
 
-`<<: *instance` copies the shared service definition (the anchor `instance`) and `<<: *instance-env` copies the shared environment, then the two lines `ZONE` and `INSTANCE` say which zone and which instance this container is. That makes eight instances in all: three in zone a, three in zone b and two in zone c, the 3/3/2 spread the plan computes. Losing zone a removes three, leaving the five that carry the projected peak.
+`<<: *instance` copies the shared service definition (the anchor `instance`) and `<<: *instance-env` copies the shared environment, then the two lines `ZONE` and `INSTANCE` say which zone and which instance this container is. That makes nine instances in all, three in each zone. The capacity plan decides how many of them run (`make set-fleet` stops the spares): for example eight as 3/3/2, where losing zone a removes three and leaves the five that carry the projected peak.
 
 ## Try it yourself
 
 1. `docker compose config --services` lists the services (the `loadtest` one only with `--profile tools`).
-2. `make up`, then `docker compose ps` lists `lb`, `db`, `ledger`, `prometheus` and eight `app-*` containers as healthy.
+2. `make up`, then `docker compose ps` lists `lb`, `db`, `ledger`, `prometheus` and nine `app-*` containers as healthy.
 3. `docker stats --no-stream` shows each instance with a CPU percentage and the `256MiB` memory limit.
-4. `docker compose stop app-a1 app-a2 app-a3` stops zone a; `curl -s localhost:47281/stats?filter=cluster.app.membership_healthy` prints `cluster.app.membership_healthy: 5`. Then `docker compose start app-a1 app-a2 app-a3`.
+4. `docker compose stop app-a1 app-a2 app-a3` stops zone a; `curl -s localhost:47281/stats?filter=cluster.app.membership_healthy` prints `cluster.app.membership_healthy: 6` (nine minus three). Then `docker compose start app-a1 app-a2 app-a3`.
 5. `make down` removes the containers and the database data.
 
 ## Mistakes people make
@@ -389,7 +397,7 @@ app-c2:
 3. Why does the load generator run in the Compose network?
    *Answer: so published-port forwarding on the host is not part of the measurement.*
 4. What does `depends_on` with `condition: service_healthy` do for Envoy?
-   *Answer: Envoy starts only after all eight instances pass their health checks.*
+   *Answer: Envoy starts only after all nine instances pass their health checks.*
 5. What does `docker compose pause` do?
    *Answer: freezes the container's processes; it still holds its connections but never answers.*
 

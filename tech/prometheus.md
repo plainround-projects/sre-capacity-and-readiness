@@ -53,7 +53,7 @@ scrape_configs:
         labels: {zone: a}
       - targets: ["app-b1:9101", "app-b2:9101", "app-b3:9101"]
         labels: {zone: b}
-      - targets: ["app-c1:9101", "app-c2:9101"]
+      - targets: ["app-c1:9101", "app-c2:9101", "app-c3:9101"]
         labels: {zone: c}
   - job_name: ledger
     static_configs:
@@ -63,7 +63,7 @@ scrape_configs:
 - The comment at the top says the demo-window rules are not loaded: evaluating them every second would compete with the load tests for CPU.
 - `scrape_interval: 2s` and `evaluation_interval: 2s`: collect and evaluate every two seconds. Fast enough to see a zone loss within seconds, slow enough not to disturb the measurement.
 - `rule_files` are the production SLO rules and the fleet alerts, at the paths where the compose file mounts them.
-- `scrape_configs` holds three jobs. `edge` scrapes `lb:9901` at `metrics_path: /stats/prometheus` (Envoy's Prometheus-format statistics on its admin port). `instances` scrapes all eight instances' ops ports (`app-a1:9101` ...) in three `static_configs` blocks, each adding a label `zone: a|b|c` to the series it scrapes, so a query can group by zone. `ledger` scrapes `ledger:9102`. Names such as `lb` and `app-a1` are Compose service names, which are DNS names inside the project's network.
+- `scrape_configs` holds three jobs. `edge` scrapes `lb:9901` at `metrics_path: /stats/prometheus` (Envoy's Prometheus-format statistics on its admin port). `instances` scrapes all nine instances' ops ports (`app-a1:9101` ...) in three `static_configs` blocks, each adding a label `zone: a|b|c` to the series it scrapes, so a query can group by zone. `ledger` scrapes `ledger:9102`. Names such as `lb` and `app-a1` are Compose service names, which are DNS names inside the project's network.
 
 ### The Compose service
 

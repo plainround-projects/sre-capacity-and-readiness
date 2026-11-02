@@ -8,7 +8,7 @@ A container starts from an **image**. An image is a read-only bundle: an operati
 
 ## Why this repository uses it
 
-The capacity exercise needs a fleet: eight identical service instances, a shared ledger, a load balancer, a database, Prometheus and a load generator. Containers make each instance a separate, resource-limited box with a fixed share of one CPU core, which is what makes "the capacity of one instance" a stable number to measure. One Dockerfile builds the image used by the instances, the ledger and the load generator. Envoy, PostgreSQL and Prometheus use ready-made images.
+The capacity exercise needs a fleet: nine identical service instances, a shared ledger, a load balancer, a database, Prometheus and a load generator. Containers make each instance a separate, resource-limited box with a fixed share of one CPU core, which is what makes "the capacity of one instance" a stable number to measure. One Dockerfile builds the image used by the instances, the ledger and the load generator. Envoy, PostgreSQL and Prometheus use ready-made images.
 
 ## Where it appears
 

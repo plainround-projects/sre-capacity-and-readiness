@@ -227,6 +227,7 @@ async def get(url):
 import json
 import time
 import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -238,6 +239,10 @@ ENVOY_ADMIN = "http://localhost:47281"
 INSTANCE_OPS = "http://localhost:47283"
 LEDGER_OPS = "http://localhost:47284"
 PROMETHEUS = "http://localhost:47290"
+INSTANCES_DEFINED = 9
+PLAN = Path(__file__).resolve().parents[2] / "docs" / "evidence" / "plan.json"
+# Right after `make up` every defined instance runs; once `make run` has planned the fleet, only the planned ones do.
+RUNNING = json.loads(PLAN.read_text())["total_instances"] if PLAN.exists() else INSTANCES_DEFINED
 
 
 def fetch(url: str) -> tuple[int, dict[str, str], str]:

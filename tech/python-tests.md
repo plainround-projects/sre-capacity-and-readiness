@@ -208,6 +208,24 @@ class TestPlan:
 
 `TestPlan` checks the formula with the lesson's numbers (1,000 requests a second today, twice that in six months, 400 per instance): five instances for the peak, eight in all, spread 3, 3, 2, and five surviving a zone loss that carry the whole projected peak. Headroom comes from the projected peak, not today's. Whatever the load (five peaks are tried), losing the largest zone still leaves enough. More zones need no more instances than fewer zones. `spread` gives larger zones first. The written-out formula contains every input. Non-positive inputs and a single zone raise `InvalidPlanError`.
 
+`TestJitterIsNotAKnee` pins the floor under the baseline:
+
+```python
+class TestJitterIsNotAKnee:
+    def test_a_few_milliseconds_of_jitter_on_a_tiny_baseline_is_not_a_rise(self):
+        gentle = [
+            step(rps, p99) for rps, p99 in ((100, 4.0), (200, 4.5), (300, 5.0), (400, 12.0), (500, 19.0), (600, 28.0))
+        ]
+        with pytest.raises(NoKneeError):
+            find_knee(gentle)
+
+    def test_a_rise_that_clears_three_times_the_floor_is_still_a_knee(self):
+        steps = [step(rps, p99) for rps, p99 in ((100, 4.0), (200, 4.5), (300, 5.0), (400, 60.0), (500, 300.0))]
+        assert find_knee(steps).knee_rps == 400
+```
+
+A curve from a 4 ms baseline that grows to 12, 19 and 28 ms is queueing and jitter, not a knee (it raises `NoKneeError`); a jump to 60 ms and then 300 ms is, and the knee is at 400.
+
 ### `tests/unit/test_latency_and_loadtest.py`
 
 ```python
@@ -390,6 +408,64 @@ class TestSuspiciousStepsAreRetried:
 ```
 
 `TestSuspiciousStepsAreRetried`: a service that stalls once at 400 requests a second reports no knee, because the second attempt is fine; the step records two attempts and a p99 under 50 ms. A real knee is there on the second try too (500 was called twice). Healthy steps run once.
+
+`TestRunsThatSpikeWithoutErrors` covers the retry and the "not evidence" rules:
+
+```python
+class TestRunsThatSpikeWithoutErrors:
+    class SpikesOnce(FakeRunner):
+        def __init__(self):
+            super().__init__(knee=10_000)
+            self.runs = 0
+
+        async def run(self, rps, duration_s):
+            self.runs += 1
+            samples, lag = await super().run(rps, duration_s)
+            if self.runs == 1:
+                return [Sample(s.scheduled_s, 0.3 if s.scheduled_s > 3 else s.latency_s, True) for s in samples], lag
+            return samples, lag
+
+    class AlwaysSpikes(FakeRunner):
+        async def run(self, rps, duration_s):
+            samples, lag = await super().run(rps, duration_s)
+            return [Sample(s.scheduled_s, 0.3, True) for s in samples], lag
+
+    class IdleCore:
+        async def cpu_seconds(self):
+            return 0.0
+
+    async def test_a_stall_that_does_not_repeat_is_run_again_and_the_clean_run_is_reported(self):
+        runner = self.SpikesOnce()
+        report = await timed_run(runner, "soak", 100, 10, slo_p99_ms=50, window_s=5, attempts=3)
+        assert report.within_slo
+        assert (runner.runs, report.result.attempts) == (2, 2)
+
+    async def test_a_spike_that_repeats_with_the_core_idle_is_a_disturbed_machine_not_evidence(self):
+        report = await timed_run(
+            self.AlwaysSpikes(), "soak", 100, 10, slo_p99_ms=50, window_s=5, probe=self.IdleCore(), attempts=2
+        )
+        assert report.result.attempts == 2
+        assert report.problem is not None
+        assert "host" in report.problem
+
+    async def test_a_spike_with_no_probe_is_reported_as_it_is(self):
+        report = await timed_run(self.AlwaysSpikes(), "fleet", 100, 10, slo_p99_ms=50, window_s=5, attempts=2)
+        assert not report.within_slo
+        assert report.problem is None
+
+    async def test_a_late_generator_makes_a_run_untrustworthy(self):
+        report = await timed_run(FakeRunner(lag_ms=40.0), "soak", 100, 5, slo_p99_ms=50, window_s=5)
+        assert report.problem is not None
+        assert "late" in report.problem
+
+    async def test_a_knee_without_cpu_at_its_limit_is_not_trustworthy(self):
+        report = await knee_test(FakeRunner(knee=500), None, [100, 200, 300, 400, 500, 600, 700], step_seconds=1)
+        assert report.knee is not None
+        assert report.problem is not None
+        assert "host" in report.problem
+```
+
+Three fakes are nested in the class. `SpikesOnce` makes the first run slow after 3 seconds and later runs clean; `AlwaysSpikes` makes every run slow; `IdleCore` is a CPU probe that always reads 0, so the core looks idle. The tests say: a stall that does not repeat is run again and the clean run is reported (two runs, `attempts == 2`); a spike that repeats while the core is idle is a disturbed machine, so the report has a `problem` that mentions the host; a spike with no probe is reported as it is (a genuine shortage must not be hidden), so `problem` is `None`; a generator 40 ms late makes the run untrustworthy; and a knee found where the core was not at its limit is not trustworthy either.
 
 ### `tests/unit/test_capacity_report.py`
 
@@ -1100,12 +1176,14 @@ class TestReplayedAlerts:
 
 ```python
 import pytest
+import yaml
 
 from capacity.application import rules
+from capacity.application.experiments import fleet_instances, spare_instances
 from capacity.domain.cpu import cpu_work
 from capacity.domain.latency import Sample
 from capacity.infrastructure.settings import InstanceSettings, LedgerSettings, SettingsError
-from capacity.infrastructure.slo_files import render_rule_files
+from capacity.infrastructure.slo_files import render_fleet_files, render_rule_files
 
 
 class TestSettings:
@@ -1133,7 +1211,7 @@ class TestSettings:
 
 ```
 
-`TestSettings`: an instance with an empty environment has the defaults (zone `a`, version `v1`, 3,000 rounds) and no ledger; the ledger URL loses a trailing slash; the ledger needs `DATABASE_URL`; bad ledger values (`POOL_SIZE` of 0 or 200, a negative `HOLD_MS`, a non-number `POOL_TIMEOUT_S`) are refused with an error that names the variable (`match=name`); and a `WORK_ROUNDS` of 0 is refused for an instance.
+`TestSettings`: an instance with an empty environment has the defaults (zone `a`, version `v1`, 3,000 rounds, the program's own default; compose sets 6,000) and no ledger; the ledger URL loses a trailing slash; the ledger needs `DATABASE_URL`; bad ledger values (`POOL_SIZE` of 0 or 200, a negative `HOLD_MS`, a non-number `POOL_TIMEOUT_S`) are refused with an error that names the variable (`match=name`); and a `WORK_ROUNDS` of 0 is refused for an instance.
 
 ```python
 class TestCpuWork:
@@ -1182,6 +1260,26 @@ def test_sample_is_a_plain_value_object():
 ```
 
 `TestRules`: the rule expressions read the Envoy edge (`envoy_http_downstream_rq_xx`, response class 5), not the instances' own `app_requests_total`; the latency expression uses the edge bucket `le="50"` and the edge's request count; a threshold that is not a bucket boundary (40 ms) is refused with `ValueError`; the committed rule files are exactly what the generator produces; and the blind-spot alert is `absent(envoy_http_downstream_rq_xx)`. The last test shows `Sample` is a plain value object: two equal samples compare equal.
+
+`TestFleetFiles` checks the generated fleet alert files and the spare-instance helpers:
+
+```python
+class TestFleetFiles:
+    def test_the_alert_thresholds_and_the_replay_follow_the_plan(self):
+        files = {path.name: text for path, text in render_fleet_files(3, 5, 3).items()}
+        rules = yaml.safe_load(files["fleet.rules.yml"])["groups"][0]["rules"]
+        assert [rule["expr"].rsplit("< ", 1)[1] for rule in rules] == ["3", "5"]
+        replay = yaml.safe_load(files["fleet.test.yml"])
+        assert replay["tests"][0]["input_series"][0]["values"] == "5x9 3x39 5x30"
+        assert replay["tests"][1]["input_series"][0]["values"] == "5x9 2x39 5x30"
+
+    def test_the_spares_are_the_instances_compose_defines_and_the_plan_does_not_run(self):
+        assert fleet_instances((3, 3, 2))[-1] == "app-c2"
+        assert spare_instances((3, 3, 2)) == ["app-c3"]
+        assert len(spare_instances((2, 2, 1))) == 4
+```
+
+For a plan that needs 3 instances for the peak of 5 in all, the rule thresholds are `< 3` and `< 5`, and the promtool replay holds 5 for 9 samples, 3 for 39 and 5 for 30, and 2 (one fewer than needed) in the paging case. `fleet_instances((3, 3, 2))` ends at `app-c2`; the spare of that fleet is `app-c3`; a fleet of 2, 2 and 1 leaves four spares.
 
 ### `tests/unit/test_evidence.py`
 
@@ -1609,16 +1707,21 @@ class TestComposeRetries:
 
 ```python
 class TestCompose:
-    async def test_healthy_members_reads_envoys_stats_line(self, monkeypatch):
-        async def stats(_):
-            return web.Response(text="cluster.app.membership_healthy: 5\n")
+    async def test_healthy_members_counts_hosts_that_are_healthy_and_not_pending_removal(self, monkeypatch):
+        async def clusters(_):
+            lines = [f"app::10.0.0.{n}:8080::health_flags::healthy" for n in range(1, 6)]
+            lines += [
+                "app::10.0.0.9:8080::health_flags::/pending_dynamic_removal"
+            ]  # dropped from DNS, still remembered
+            lines += ["app::10.0.0.8:8080::health_flags::/failed_active_hc"]
+            return web.Response(text="\n".join(lines) + "\n")
 
         app = web.Application()
-        app.router.add_get("/stats", stats)
+        app.router.add_get("/clusters", clusters)
         server = TestServer(app)
         await server.start_server()
         try:
-            monkeypatch.setattr(compose, "HEALTHY_MEMBERS_URL", f"http://127.0.0.1:{server.port}/stats")
+            monkeypatch.setattr(compose, "CLUSTERS_URL", f"http://127.0.0.1:{server.port}/clusters")
             assert await asyncio.to_thread(compose.healthy_members) == 5
             await asyncio.to_thread(compose.wait_for_members, 5, 2.0)
             with pytest.raises(TimeoutError):
@@ -1627,7 +1730,7 @@ class TestCompose:
             await server.close()
 
     def test_an_unreachable_balancer_counts_as_zero_healthy(self, monkeypatch):
-        monkeypatch.setattr(compose, "HEALTHY_MEMBERS_URL", "http://127.0.0.1:9/stats")
+        monkeypatch.setattr(compose, "CLUSTERS_URL", "http://127.0.0.1:9/clusters")
         assert compose.healthy_members() == 0
 
     async def test_versions_seen_reads_the_version_header(self):
@@ -1645,7 +1748,7 @@ class TestCompose:
 
 ```
 
-`TestCompose`: `healthy_members` reads Envoy's statistic line from a fake `/stats` endpoint (5), `wait_for_members(5)` returns, and waiting for 8 raises `TimeoutError`; the blocking helpers run in `asyncio.to_thread` so they do not block the server in the same process. An unreachable balancer counts as zero healthy, and `versions_seen` reads the `X-Version` header.
+`TestCompose`: `healthy_members` reads a fake `/clusters` page with five healthy hosts, one pending removal and one failed health check, and counts 5; `wait_for_members(5)` returns, and waiting for 8 raises `TimeoutError`; the blocking helpers run in `asyncio.to_thread` so they do not block the server in the same process. An unreachable balancer counts as zero healthy, and `versions_seen` reads the `X-Version` header.
 
 ```python
 async def test_the_load_test_cli_runs_a_fleet_report_against_a_real_instance(capsys):
@@ -1674,12 +1777,11 @@ async def test_the_load_test_cli_runs_a_fleet_report_against_a_real_instance(cap
         assert (report["experiment"], report["label"], report["requests"], report["errors"]) == ("fleet", "t", 100, 0)
         knee_argv = [
             "knee", "--target", f"http://127.0.0.1:{server.port}", "--ops", f"http://127.0.0.1:{ops.port}",
-            "--steps", "10,20,30,40", "--step-seconds", "0.5",
+            "--steps", "10,20,30,40", "--step-seconds", "0.5", "--attempts", "1",
         ]  # fmt: skip
-        await asyncio.to_thread(loadtest_cli.main, knee_argv)
-        knee = json.loads(capsys.readouterr().out)
-        assert knee["experiment"] == "knee"
-        assert len(knee["steps"]) == 4
+        with pytest.raises(SystemExit, match="not a valid measurement, nothing written"):
+            await asyncio.to_thread(loadtest_cli.main, knee_argv)
+        assert capsys.readouterr().out == ""  # a load that never reached a knee leaves nothing to save as evidence
     finally:
         await server.close()
         await ops.close()
@@ -1704,18 +1806,21 @@ class TestCapacityCli:
 
     def test_the_plan_command_sizes_the_fleet_from_the_measured_safe_load_and_saves_it(self, tmp_path, root, capsys):
         project = self.project(tmp_path, root, {"knee": {"safe_rps": 400}, "fleet-zone-loss": {"within_slo": True}})
-        assert self.run(["plan", "--evidence", str(project / "docs" / "evidence")]) == 0
+        assert self.run(["plan", "--evidence", str(project / "docs" / "evidence"), "--root", str(project)]) == 0
         plan = JsonEvidence(project / "docs" / "evidence").load("plan")
         assert plan is not None
         assert (plan["instances_for_peak"], plan["total_instances"], plan["verified_by_lost_zone_run"]) == (5, 8, True)
         assert "ceil(2000 / 400) = 5" in capsys.readouterr().out
+        rules = (project / "slo" / "alerts" / "fleet.rules.yml").read_text()
+        assert "< 5" in rules
+        assert "< 8" in rules
 
     def test_the_plan_command_fails_when_the_plan_needs_more_instances_than_the_compose_file_defines(
         self, tmp_path, root, capsys
     ):
-        project = self.project(tmp_path, root, {"knee": {"safe_rps": 300}})
-        assert self.run(["plan", "--evidence", str(project / "docs" / "evidence")]) == 1
-        assert "docker-compose.yml defines 8" in capsys.readouterr().err
+        project = self.project(tmp_path, root, {"knee": {"safe_rps": 200}})
+        assert self.run(["plan", "--evidence", str(project / "docs" / "evidence"), "--root", str(project)]) == 1
+        assert "docker-compose.yml defines 9" in capsys.readouterr().err
 
     def test_the_plan_command_refuses_to_guess_without_a_measurement(self, tmp_path):
         with pytest.raises(SystemExit, match="no safe load"):
@@ -1750,7 +1855,33 @@ class TestCapacityCli:
             assert exit_info.value.code == expected
 ```
 
-`TestCapacityCli` runs the real entry points against a copied project in `tmp_path`. `project(...)` copies `slo/` and `readiness/` and saves the given evidence; `run(argv)` expects `SystemExit` and returns its code. `plan` sizes the fleet from a measured safe load of 400 (5 for the peak, 8 in all, verified by the lost-zone run) and prints the formula; with a safe load of 300 it needs more than the 8 instances compose defines, so it exits 1 with the message; with no measurement it refuses to guess (`no safe load`). `review` prints the checklist, writes `docs/launch-decision.md` and says `restore not yet tested`. `report` needs all the evidence. The `rules` command detects drift (exit 1), writes (exit 0) and then finds none (exit 0), using `monkeypatch.chdir` to run inside the temporary project.
+`TestCapacityCli` runs the real entry points against a copied project in `tmp_path`. `project(...)` copies `slo/` and `readiness/` and saves the given evidence; `run(argv)` expects `SystemExit` and returns its code. `plan` sizes the fleet from a measured safe load of 400 (5 for the peak, 8 in all, verified by the lost-zone run), prints the formula and writes the fleet alert thresholds (`< 5` and `< 8`) into the project; with a safe load of 200 it needs more than the 9 instances compose defines, so it exits 1 with the message; with no measurement it refuses to guess (`no safe load`). `review` prints the checklist, writes `docs/launch-decision.md` and says `restore not yet tested`. `report` needs all the evidence. The `rules` command detects drift (exit 1), writes (exit 0) and then finds none (exit 0), using `monkeypatch.chdir` to run inside the temporary project.
+
+`TestPreflight` replaces `os.getloadavg` with a fake:
+
+```python
+class TestPreflight:
+    def test_a_busy_machine_is_refused_before_anything_is_measured(self, monkeypatch):
+        from capacity.interfaces import experiments_cli
+
+        monkeypatch.delenv("MAX_LOAD", raising=False)
+        monkeypatch.setattr("os.getloadavg", lambda: (99.0, 50.0, 20.0))
+        with pytest.raises(SystemExit, match="the machine is busy"):
+            experiments_cli.preflight()
+
+    def test_a_quiet_machine_passes_and_the_limit_can_be_raised(self, monkeypatch):
+        from capacity.interfaces import experiments_cli
+
+        monkeypatch.setattr("os.getloadavg", lambda: (0.5, 0.5, 0.5))
+        assert experiments_cli.preflight()["load_1min"] == 0.5
+        monkeypatch.setattr("os.getloadavg", lambda: (99.0, 50.0, 20.0))
+        monkeypatch.setenv("MAX_LOAD", "100")
+        assert experiments_cli.preflight()["load_1min"] == 99.0
+```
+
+A load of 99 is refused with "the machine is busy" before anything is measured (`delenv` makes sure no `MAX_LOAD` from the environment changes the test); a load of 0.5 passes and reports what it saw; and setting `MAX_LOAD` to 100 lets the busy machine through. The import inside each test avoids loading the experiments module until it is needed.
+
+The load-test command test also changed: the knee run over 10 to 40 requests a second now expects `SystemExit` with the message "not a valid measurement, nothing written", because a load that never reaches a knee leaves nothing to save, and checks that standard output stayed empty.
 
 ### `tests/measurements/test_done_when.py`
 
@@ -1835,8 +1966,8 @@ Step four: the naive pool size is 20, the naive pool failed, the resized pool he
 
 ```python
 def test_a_rolling_restart_and_a_rollback_under_load_cost_no_request(evidence):
-    rollout = evidence("rollout")
-    assert rollout["restarted"] == 16
+    rollout, plan = evidence("rollout"), evidence("plan")
+    assert rollout["restarted"] == 2 * plan["total_instances"], "every instance restarted twice: to v2, then back to v1"
     assert rollout["errors"] == 0
     assert rollout["within_slo"] is True
     assert rollout["rollback_ok"] is True
@@ -1859,6 +1990,7 @@ Two more: a rolling restart of 16 instance restarts (roll to v2, roll back to v1
 import json
 import time
 import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -1870,6 +2002,10 @@ ENVOY_ADMIN = "http://localhost:47281"
 INSTANCE_OPS = "http://localhost:47283"
 LEDGER_OPS = "http://localhost:47284"
 PROMETHEUS = "http://localhost:47290"
+INSTANCES_DEFINED = 9
+PLAN = Path(__file__).resolve().parents[2] / "docs" / "evidence" / "plan.json"
+# Right after `make up` every defined instance runs; once `make run` has planned the fleet, only the planned ones do.
+RUNNING = json.loads(PLAN.read_text())["total_instances"] if PLAN.exists() else INSTANCES_DEFINED
 
 
 def fetch(url: str) -> tuple[int, dict[str, str], str]:
@@ -1894,16 +2030,16 @@ def test_requests_through_the_edge_reach_every_instance_in_every_zone():
         seen.add(headers["x-instance"])
         zones.add(headers["x-zone"])
     assert zones == {"a", "b", "c"}
-    assert len(seen) == 8
+    assert len(seen) == RUNNING
 
 
-def test_the_load_balancer_sees_eight_healthy_instances():
+def test_the_load_balancer_counts_exactly_the_running_instances_as_healthy():
     _, _, body = fetch(f"{ENVOY_ADMIN}/stats?filter=cluster.app.membership_healthy")
-    assert body.strip().endswith(": 8")
+    assert body.strip().endswith(f": {RUNNING}")
 
 ```
 
-Requests through the edge reach every instance in every zone (120 requests reach zones a, b and c and all 8 instances), and Envoy counts eight healthy members.
+Requests through the edge reach every instance in every zone (120 requests reach zones a, b and c and every instance that is running: all nine right after `make up`, or the plan's fleet after `make run`), and Envoy counts exactly the running instances as healthy.
 
 ```python
 def test_every_metric_the_dashboards_and_alerts_query_is_really_exported():
@@ -1922,7 +2058,7 @@ def test_prometheus_scrapes_the_edge_the_instances_and_the_ledger():
         time.sleep(1)
     jobs = {target["labels"]["job"] for target in targets}
     assert jobs == {"edge", "instances", "ledger"}
-    assert len([t for t in targets if t["labels"]["job"] == "instances"]) == 8
+    assert len([t for t in targets if t["labels"]["job"] == "instances"]) == INSTANCES_DEFINED
 
 
 def test_prometheus_loaded_the_generated_slo_rules_and_the_fleet_alerts():
@@ -1931,7 +2067,9 @@ def test_prometheus_loaded_the_generated_slo_rules_and_the_fleet_alerts():
     assert {"ApiAvailabilityFastBurn", "ApiLatencyFastBurn", "FleetBelowPeakCapacity", "EdgeMetricsAbsent"} <= names
 ```
 
-Every metric the dashboards and alerts query is really exported (checked against Envoy, an instance and the ledger, ignoring `up`, which Prometheus itself makes); Prometheus scrapes the edge, the instances and the ledger (at least ten targets, eight of them instances); and Prometheus loaded the generated SLO rules and the fleet alerts, including `EdgeMetricsAbsent`.
+Every metric the dashboards and alerts query is really exported (checked against Envoy, an instance and the ledger, ignoring `up`, which Prometheus itself makes); Prometheus scrapes the edge, the instances and the ledger (at least ten targets, nine of them instances, running or not); and Prometheus loaded the generated SLO rules and the fleet alerts, including `EdgeMetricsAbsent`.
+
+The constants added at the top say what the smoke tests expect: `INSTANCES_DEFINED = 9` (instances compose defines), `PLAN` (the path of the plan evidence) and `RUNNING`, which is the plan's `total_instances` when the plan exists and 9 right after `make up`. So the same tests are right before and after `make run` has chosen the fleet.
 
 ## Try it yourself
 

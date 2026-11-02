@@ -104,6 +104,7 @@ The code lives in `src/` (the "src layout"), and setuptools is told to look ther
 line-length = 120
 target-version = "py312"
 src = ["src", "tests"]
+extend-exclude = ["tech"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "N", "C4", "RUF", "PT", "ASYNC", "D100", "D101", "D103", "D104"]

@@ -281,7 +281,7 @@ from collections.abc import Sequence
 from typing import Any
 from urllib.parse import urlsplit
 
-from capacity.application.loadtest import GENERATOR_LAG_LIMIT_MS, knee_test, timed_run
+from capacity.application.loadtest import knee_test, timed_run
 from capacity.infrastructure.logging_setup import configure_logging
 from capacity.infrastructure.openloop import MetricsCpuProbe, RawOpenLoopRunner
 
@@ -293,21 +293,41 @@ def _runner(target: str) -> RawOpenLoopRunner:
     return RawOpenLoopRunner(parts.hostname or "localhost", parts.port or 80)
 
 
-async def _knee(args: argparse.Namespace) -> dict[str, Any]:
-    runner = _runner(args.target)
-    ops = urlsplit(args.ops)
-    probe = MetricsCpuProbe(ops.hostname or "localhost", ops.port or 9101)
-    steps = [float(value) for value in args.steps.split(",")]
-    report = await knee_test(runner, probe, steps, args.step_seconds, args.margin)
-    await runner.close()
-    return {"experiment": "knee", "step_seconds": args.step_seconds, **report.to_dict()}
+def _probe(ops_url: str) -> MetricsCpuProbe:
+    ops = urlsplit(ops_url)
+    return MetricsCpuProbe(ops.hostname or "localhost", ops.port or 9101)
 
 
-async def _timed(args: argparse.Namespace) -> dict[str, Any]:
+async def _knee(args: argparse.Namespace) -> tuple[dict[str, Any], str | None]:
+    """The knee test, repeated up to `--attempts` times until it is trustworthy; the last result and its problem."""
+    document: dict[str, Any] = {}
+    problem: str | None = None
+    for attempt in range(1, args.attempts + 1):
+        runner = _runner(args.target)
+        steps = [float(value) for value in args.steps.split(",")]
+        report = await knee_test(runner, _probe(args.ops), steps, args.step_seconds, args.margin)
+        await runner.close()
+        document = {
+            "experiment": "knee",
+            "step_seconds": args.step_seconds,
+            "test_attempts": attempt,
+            **report.to_dict(),
+        }
+        problem = report.problem
+        if problem is None:
+            break
+        print(f"knee attempt {attempt} discarded: {problem}", file=sys.stderr)
+    return document, problem
+
+
+async def _timed(args: argparse.Namespace) -> tuple[dict[str, Any], str | None]:
     runner = _runner(args.target)
-    report = await timed_run(runner, args.label, args.rps, args.seconds, args.slo_p99_ms, args.window)
+    probe = _probe(args.ops) if args.ops else None
+    report = await timed_run(
+        runner, args.label, args.rps, args.seconds, args.slo_p99_ms, args.window, probe, args.attempts
+    )
     await runner.close()
-    return {"experiment": args.command, **report.to_dict()}
+    return {"experiment": args.command, **report.to_dict()}, report.problem
 ```
 
 The program prints one JSON document on standard output. `DEFAULT_STEPS` is the list of target rates for the knee search. `_runner` builds a `RawOpenLoopRunner` from a URL's host and port. `_knee` builds the runner and a CPU probe on the instance's ops port, splits the comma-separated steps into numbers, runs `knee_test`, closes the runner and returns the report with the step length. `_timed` runs a soak or fleet run for the given rate and time.
@@ -323,6 +343,9 @@ def build_parser() -> argparse.ArgumentParser:
     knee.add_argument("--steps", default=DEFAULT_STEPS, help="comma-separated requests per second")
     knee.add_argument("--step-seconds", type=float, default=10.0, help="the lesson uses 120 for the real thing")
     knee.add_argument("--margin", type=float, default=0.25, help="how far below the knee to set the safe load")
+    knee.add_argument(
+        "--attempts", type=int, default=3, help="repeat the whole test this often until it is trustworthy"
+    )
     for name, helptext in (
         ("soak", "hold one instance at the safe load"),
         ("fleet", "load the fleet through the load balancer"),
@@ -334,6 +357,10 @@ def build_parser() -> argparse.ArgumentParser:
         run.add_argument("--label", default=name)
         run.add_argument("--slo-p99-ms", type=float, default=50.0)
         run.add_argument("--window", type=float, default=10.0, help="seconds per p99 window")
+        run.add_argument("--ops", default="", help="the instance's ops port, to tell a saturated core from a busy host")
+        run.add_argument(
+            "--attempts", type=int, default=3, help="run again this often when a window spiked with no errors"
+        )
     return parser
 
 
@@ -341,17 +368,70 @@ def main(argv: Sequence[str] | None = None) -> None:
     """Entry point of `capacity-loadtest`."""
     configure_logging("WARNING")
     args = build_parser().parse_args(argv)
-    result = asyncio.run(_knee(args) if args.command == "knee" else _timed(args))
-    if result["generator_lag_p99_ms"] > GENERATOR_LAG_LIMIT_MS:
-        print(
-            f"warning: the load generator itself was late by {result['generator_lag_p99_ms']} ms at p99; "
-            "the numbers include its own queueing",
-            file=sys.stderr,
-        )
+    result, problem = asyncio.run(_knee(args) if args.command == "knee" else _timed(args))
+    if problem is not None:
+        sys.exit(f"not a valid measurement, nothing written: {problem}. Run again when the machine is quiet.")
     print(json.dumps(result, indent=2))
 ```
 
 `build_parser` defines three subcommands: `knee` (with `--target`, `--ops`, `--steps`, `--step-seconds` and `--margin`) and `soak` and `fleet`, which share `--target`, `--rps`, `--seconds`, `--label`, `--slo-p99-ms` and `--window`. `main` runs the chosen one with `asyncio.run` and, if the generator's own p99 lag is over `GENERATOR_LAG_LIMIT_MS`, prints a warning on standard error that the numbers include the generator's own queueing, then prints the JSON.
+
+#### Refusing to save a measurement that cannot be trusted
+
+```python
+def _probe(ops_url: str) -> MetricsCpuProbe:
+    ops = urlsplit(ops_url)
+    return MetricsCpuProbe(ops.hostname or "localhost", ops.port or 9101)
+```
+
+`_probe` builds the CPU probe from the instance's ops URL.
+
+```python
+async def _knee(args: argparse.Namespace) -> tuple[dict[str, Any], str | None]:
+    """The knee test, repeated up to `--attempts` times until it is trustworthy; the last result and its problem."""
+    document: dict[str, Any] = {}
+    problem: str | None = None
+    for attempt in range(1, args.attempts + 1):
+        runner = _runner(args.target)
+        steps = [float(value) for value in args.steps.split(",")]
+        report = await knee_test(runner, _probe(args.ops), steps, args.step_seconds, args.margin)
+        await runner.close()
+        document = {
+            "experiment": "knee",
+            "step_seconds": args.step_seconds,
+            "test_attempts": attempt,
+            **report.to_dict(),
+        }
+        problem = report.problem
+        if problem is None:
+            break
+        print(f"knee attempt {attempt} discarded: {problem}", file=sys.stderr)
+    return document, problem
+```
+
+`_knee` repeats the whole knee test, up to `--attempts` times (three by default), until `KneeReport.problem` is `None`. Each discarded attempt prints why on standard error. It returns the last document and its problem.
+
+```python
+async def _timed(args: argparse.Namespace) -> tuple[dict[str, Any], str | None]:
+    runner = _runner(args.target)
+    probe = _probe(args.ops) if args.ops else None
+    report = await timed_run(
+        runner, args.label, args.rps, args.seconds, args.slo_p99_ms, args.window, probe, args.attempts
+    )
+    await runner.close()
+    return {"experiment": args.command, **report.to_dict()}, report.problem
+```
+
+`_timed` builds the probe only if `--ops` was given and passes the attempts to `timed_run`.
+
+```python
+result, problem = asyncio.run(_knee(args) if args.command == "knee" else _timed(args))
+if problem is not None:
+    sys.exit(f"not a valid measurement, nothing written: {problem}. Run again when the machine is quiet.")
+print(json.dumps(result, indent=2))
+```
+
+`main` exits with a message and prints **nothing on standard output** when the measurement is not valid, so the Makefile's redirect leaves no evidence. `--attempts` (knee and the timed runs) and `--ops` (the timed runs) are the new options; the parser lines were quoted above.
 
 ### `interfaces/slo_cli.py`: the rule generator
 
@@ -403,6 +483,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -411,25 +492,61 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from capacity.application.experiments import choose_pool_size, naive_pool_size, sweep_sizes
+from capacity.application.experiments import (
+    choose_pool_size,
+    fleet_instances,
+    naive_pool_size,
+    spare_instances,
+    sweep_sizes,
+)
 from capacity.infrastructure.compose import Compose, versions_seen, wait_for_members
 from capacity.infrastructure.logging_setup import configure_logging
 from capacity.infrastructure.project_files import JsonEvidence
 
-ZONE_A = ["app-a1", "app-a2", "app-a3"]
-INSTANCES = ["app-a1", "app-a2", "app-a3", "app-b1", "app-b2", "app-b3", "app-c1", "app-c2"]
+MAX_LOAD_PER_CPU = 0.6  # the one-minute load average per CPU above which the host is too busy to measure on
 LEDGER_URL = "http://ledger:8082"
 SLO_P99_MS = "50"
 FLEET = "http://lb:8080"
-PEAK_RPS = 2000
 
 ```
 
-The docstring: each experiment prints what it measured and writes it to `docs/evidence/<name>.json`, which the readiness review and the tests read, and everything here drives the running stack from the host. The constants name the stack: zone A's three instances, all eight instances, the ledger's URL inside the compose network, the 50 ms SLO, the load balancer's URL and the projected peak of 2,000 requests a second.
+The docstring: each experiment prints what it measured and writes it to `docs/evidence/<name>.json`, which the readiness review and the tests read, and everything here drives the running stack from the host. The constants name the stack: the host load per CPU above which `preflight` refuses to measure, the ledger's URL inside the compose network, the 50 ms SLO and the load balancer's URL. Which instances run, and the peak they must carry, now come from the plan (`PlannedFleet`, below).
 
 ```python
 def _say(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
+
+
+class PlannedFleet:
+    """The fleet `make plan` decided on, read from its evidence: which instances run and the peak they must carry."""
+
+    def __init__(self, evidence: JsonEvidence) -> None:
+        """Read `plan.json`; exit with a message when the plan has not been made."""
+        plan = evidence.load("plan")
+        if plan is None:
+            sys.exit("no plan yet: run `make plan` (after `make knee`) first")
+        distribution = [int(str(size)) for size in plan["distribution"]]  # type: ignore[attr-defined]
+        self.instances = fleet_instances(distribution)
+        self.zone_a = fleet_instances(distribution[:1])
+        self.spares = spare_instances(distribution)
+        self.peak_rps = float(str(plan["future_peak_rps"]))
+
+    @property
+    def size(self) -> int:
+        """Instances in the fleet."""
+        return len(self.instances)
+
+
+def preflight() -> dict[str, Any]:
+    """Refuse to measure on a busy machine: the numbers would describe the machine, not the service."""
+    load = os.getloadavg()[0]
+    limit = MAX_LOAD_PER_CPU * (os.cpu_count() or 1)
+    if load > float(os.environ.get("MAX_LOAD", limit)):
+        sys.exit(
+            f"the machine is busy: one-minute load {load:.1f} is above {limit:.1f}. Measurements taken now would "
+            "describe the machine, not the service. Stop other work and run again (or set MAX_LOAD to accept it)."
+        )
+    return {"experiment": "preflight", "load_1min": round(load, 2), "limit": round(limit, 2)}
 
 
 def _fleet(compose: Compose, label: str, rps: float, seconds: float) -> dict[str, Any]:
@@ -451,43 +568,58 @@ def _fleet(compose: Compose, label: str, rps: float, seconds: float) -> dict[str
 `_say` prints progress on standard error (keeping standard output for the JSON). `_fleet` runs a fleet load test through the load balancer at the given rate and time with the 50 ms SLO.
 
 ```python
+def set_fleet(compose: Compose, evidence: JsonEvidence) -> dict[str, Any]:
+    """Run exactly the instances the plan says: start those it names, stop the spares, wait for the balancer."""
+    fleet = PlannedFleet(evidence)
+    _say(f"running {fleet.size} instances; spares: {', '.join(fleet.spares) or 'none'}")
+    if fleet.spares:
+        compose.stop(fleet.spares)
+    compose.start(fleet.instances)
+    wait_for_members(fleet.size)
+    return {"experiment": "set-fleet", "instances": fleet.instances, "spares": fleet.spares}
+
+
 def zone_loss(compose: Compose, evidence: JsonEvidence, seconds: float) -> dict[str, Any]:
-    """Lose the largest zone, wait until the balancer has noticed, and run the projected peak on the five survivors."""
-    _say("stopping zone a (the largest zone, three instances)")
-    compose.stop(ZONE_A)
+    """Lose the largest zone, wait until the balancer has noticed, and run the projected peak on the survivors."""
+    fleet = PlannedFleet(evidence)
+    survivors = fleet.size - len(fleet.zone_a)
+    _say(f"stopping zone a (the largest zone, {len(fleet.zone_a)} instances)")
+    compose.stop(fleet.zone_a)
     try:
-        wait_for_members(5)
-        report = _fleet(compose, "zone-a-down", PEAK_RPS, seconds)
+        wait_for_members(survivors)
+        report = _fleet(compose, "zone-a-down", fleet.peak_rps, seconds)
     finally:
-        compose.start(ZONE_A)
-        wait_for_members(8)
-    report["healthy_instances"] = 5
+        compose.start(fleet.zone_a)
+        wait_for_members(fleet.size)
+    report["healthy_instances"] = survivors
     evidence.save("fleet-zone-loss", report)
     return report
 
 
 def full_fleet(compose: Compose, evidence: JsonEvidence, seconds: float) -> dict[str, Any]:
-    """The full fleet of eight at the projected peak with no shared dependency: the CPU-only baseline."""
-    report = _fleet(compose, "fleet-8", PEAK_RPS, seconds)
-    report["healthy_instances"] = 8
+    """The whole planned fleet at the projected peak with no shared dependency: the CPU-only baseline."""
+    fleet = PlannedFleet(evidence)
+    report = _fleet(compose, f"fleet-{fleet.size}", fleet.peak_rps, seconds)
+    report["healthy_instances"] = fleet.size
     evidence.save("fleet-full", report)
     return report
 ```
 
-`zone_loss` stops zone A (the largest zone), waits until the balancer counts exactly five healthy members, runs the projected peak on the five survivors and, in a `finally`, restarts the zone and waits for eight, so a failed run still leaves the stack whole. `full_fleet` runs the same peak on all eight instances with no shared dependency: the CPU-only baseline.
+`zone_loss` reads the planned fleet, stops zone A (the largest zone), waits until the balancer counts exactly the survivors (the fleet minus zone A), runs the projected peak on them and, in a `finally`, restarts the zone and waits for the whole fleet, so a failed run still leaves the stack whole. `full_fleet` runs the same peak on the whole planned fleet with no shared dependency: the CPU-only baseline. `set_fleet` (above them) starts the instances the plan names and stops the spares.
 
 ```python
 def pool_sweep(compose: Compose, evidence: JsonEvidence, seconds: float, hold_ms: float) -> dict[str, Any]:
     """Reintroduce the shared ledger and step its connection pool up from the naive size until the SLO holds."""
-    _say(f"linking all {len(INSTANCES)} instances to the ledger")
-    compose.recreate(INSTANCES, env={"LEDGER_URL": LEDGER_URL})
-    wait_for_members(8)
-    naive = naive_pool_size(PEAK_RPS, hold_ms)
+    fleet = PlannedFleet(evidence)
+    _say(f"linking all {fleet.size} instances to the ledger")
+    compose.recreate(fleet.instances, env={"LEDGER_URL": LEDGER_URL})
+    wait_for_members(fleet.size)
+    naive = naive_pool_size(fleet.peak_rps, hold_ms)
     results: list[dict[str, Any]] = []
     for size in sweep_sizes(naive):
         _say(f"ledger pool of {size}")
         compose.recreate(["ledger"], env={"POOL_SIZE": str(size), "LEDGER_URL": LEDGER_URL})
-        report = _fleet(compose, f"pool-{size}", PEAK_RPS, seconds)
+        report = _fleet(compose, f"pool-{size}", fleet.peak_rps, seconds)
         report["pool_size"] = size
         results.append(report)
     chosen = choose_pool_size(results)
@@ -495,14 +627,14 @@ def pool_sweep(compose: Compose, evidence: JsonEvidence, seconds: float, hold_ms
         sys.exit("no pool size in the sweep held the SLO; extend the sweep")
     _say(f"adopting a pool of {chosen}: the smallest that held, plus 25 percent headroom")
     compose.recreate(["ledger"], env={"POOL_SIZE": str(chosen), "LEDGER_URL": LEDGER_URL})
-    resized = _fleet(compose, f"pool-{chosen}", PEAK_RPS, seconds)
+    resized = _fleet(compose, f"pool-{chosen}", fleet.peak_rps, seconds)
     resized["pool_size"] = chosen
     evidence.save("fleet-pool-naive", results[0])
     evidence.save("fleet-pool-resized", resized)
     summary = {
         "naive_pool_size": naive,
         "hold_ms": hold_ms,
-        "peak_rps": PEAK_RPS,
+        "peak_rps": fleet.peak_rps,
         "chosen_pool_size": chosen,
         "sweep": results,
     }
@@ -510,12 +642,12 @@ def pool_sweep(compose: Compose, evidence: JsonEvidence, seconds: float, hold_ms
     return summary
 ```
 
-`pool_sweep` reintroduces the ledger: it links all eight instances to it, computes the naive pool size, and for each size in the sweep recreates the ledger with that `POOL_SIZE` and runs the peak. It chooses the smallest size that held plus 25% (or exits with a message that no size held), re-runs the chosen size to confirm, saves the naive result, the resized result and the whole sweep as evidence.
+`pool_sweep` reintroduces the ledger: it links all the planned instances to it, computes the naive pool size from the plan's projected peak, and for each size in the sweep recreates the ledger with that `POOL_SIZE` and runs the peak. It chooses the smallest size that held plus 25% (or exits with a message that no size held), re-runs the chosen size to confirm, saves the naive result, the resized result and the whole sweep as evidence.
 
 ```python
 def dependency(compose: Compose, evidence: JsonEvidence, ledger_timeout_s: float) -> dict[str, Any]:
     """Freeze the ledger (it accepts connections and never answers) and check that requests fail within a bound."""
-    compose.recreate(INSTANCES[:1], env={"LEDGER_URL": LEDGER_URL})
+    compose.recreate(PlannedFleet(evidence).instances[:1], env={"LEDGER_URL": LEDGER_URL})
     compose.pause("ledger")
     try:
         report = compose.loadtest(
@@ -553,9 +685,10 @@ def dependency(compose: Compose, evidence: JsonEvidence, ledger_timeout_s: float
 ```python
 def rollout(compose: Compose, evidence: JsonEvidence, rps: float) -> dict[str, Any]:
     """Roll every instance to v2 one at a time under load, then roll back to v1 the same way, and count failures."""
-    compose.recreate(INSTANCES, env={"APP_VERSION": "v1", "LEDGER_URL": LEDGER_URL})
-    wait_for_members(8)
-    seconds = 40 + 2 * len(INSTANCES) * 12
+    fleet = PlannedFleet(evidence)
+    compose.recreate(fleet.instances, env={"APP_VERSION": "v1", "LEDGER_URL": LEDGER_URL})
+    wait_for_members(fleet.size)
+    seconds = 40 + 2 * fleet.size * 12
     load = compose.start_loadtest(
         "fleet", "--target", FLEET, "--rps", str(rps), "--seconds", str(seconds), "--label", "rollout"
     )
@@ -563,9 +696,9 @@ def rollout(compose: Compose, evidence: JsonEvidence, rps: float) -> dict[str, A
     restarted = 0
     for version in ("v2", "v1"):
         _say(f"rolling to {version}, one instance at a time")
-        for service in INSTANCES:
+        for service in fleet.instances:
             compose.recreate([service], env={"APP_VERSION": version, "LEDGER_URL": LEDGER_URL})
-            wait_for_members(8)
+            wait_for_members(fleet.size)
             restarted += 1
         seen = versions_seen("http://localhost:47280", 60)
         _say(f"versions answering after the roll to {version}: {sorted(seen)}")
@@ -591,7 +724,7 @@ def rollout(compose: Compose, evidence: JsonEvidence, rps: float) -> dict[str, A
     return document
 ```
 
-`rollout` puts all instances on version v1 and starts a load generator in the background for long enough to cover the whole roll. It then recreates the instances one at a time, first to v2 and then back to v1, waiting for eight healthy members after each, and after each full roll samples 60 responses to check that only the expected version answers (otherwise it kills the load and exits). It then reads the load generator's report and saves the restart count, the error count, the p99 and whether it stayed within the SLO.
+`rollout` puts all instances on version v1 and starts a load generator in the background for long enough to cover the whole roll. It then recreates the instances one at a time, first to v2 and then back to v1, waiting for the whole planned fleet to be healthy after each, and after each full roll samples 60 responses to check that only the expected version answers (otherwise it kills the load and exits). It then reads the load generator's report and saves the restart count, the error count, the p99 and whether it stayed within the SLO.
 
 ```python
 def restore(compose: Compose, evidence: JsonEvidence, rto_target_s: float) -> dict[str, Any]:
@@ -648,6 +781,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="capacity-experiments", description=__doc__)
     parser.add_argument("--project", default=".")
     sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("preflight")
+    sub.add_parser("set-fleet")
     for name in ("zone-loss", "full-fleet"):
         sub.add_parser(name).add_argument("--seconds", type=float, default=40.0)
     pool = sub.add_parser("pool-sweep")
@@ -659,7 +794,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parser.parse_args(argv)
     project = Path(args.project).resolve()
     compose, evidence = Compose(project), JsonEvidence(project / "docs" / "evidence")
-    if args.command == "zone-loss":
+    if args.command == "preflight":
+        result = preflight()
+    elif args.command == "set-fleet":
+        result = set_fleet(compose, evidence)
+    elif args.command == "zone-loss":
         result = zone_loss(compose, evidence, args.seconds)
     elif args.command == "full-fleet":
         result = full_fleet(compose, evidence, args.seconds)
@@ -676,6 +815,60 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 `_get` returns whether a URL answers 200 within 3 seconds. `main` defines one subcommand per experiment with its options, builds the `Compose` and the evidence store under `docs/evidence` and prints the chosen experiment's result as JSON.
 
+#### The plan decides which instances run
+
+```python
+class PlannedFleet:
+    """The fleet `make plan` decided on, read from its evidence: which instances run and the peak they must carry."""
+
+    def __init__(self, evidence: JsonEvidence) -> None:
+        """Read `plan.json`; exit with a message when the plan has not been made."""
+        plan = evidence.load("plan")
+        if plan is None:
+            sys.exit("no plan yet: run `make plan` (after `make knee`) first")
+        distribution = [int(str(size)) for size in plan["distribution"]]  # type: ignore[attr-defined]
+        self.instances = fleet_instances(distribution)
+        self.zone_a = fleet_instances(distribution[:1])
+        self.spares = spare_instances(distribution)
+        self.peak_rps = float(str(plan["future_peak_rps"]))
+
+    @property
+    def size(self) -> int:
+        """Instances in the fleet."""
+        return len(self.instances)
+```
+
+`PlannedFleet` reads `docs/evidence/plan.json` (exiting with "no plan yet" if there is none) and exposes the instances to run (`fleet_instances` of the plan's distribution), zone A's instances (the largest zone), the spares and the projected peak. Every experiment now builds one instead of using fixed lists of eight names and a fixed 2,000 requests a second.
+
+```python
+def preflight() -> dict[str, Any]:
+    """Refuse to measure on a busy machine: the numbers would describe the machine, not the service."""
+    load = os.getloadavg()[0]
+    limit = MAX_LOAD_PER_CPU * (os.cpu_count() or 1)
+    if load > float(os.environ.get("MAX_LOAD", limit)):
+        sys.exit(
+            f"the machine is busy: one-minute load {load:.1f} is above {limit:.1f}. Measurements taken now would "
+            "describe the machine, not the service. Stop other work and run again (or set MAX_LOAD to accept it)."
+        )
+    return {"experiment": "preflight", "load_1min": round(load, 2), "limit": round(limit, 2)}
+```
+
+`preflight` compares the one-minute load average (`os.getloadavg()[0]`) with `MAX_LOAD_PER_CPU` (0.6) times the CPU count, or with the `MAX_LOAD` environment variable when set, and exits with a message when the machine is busier. Otherwise it returns the numbers it saw.
+
+```python
+def set_fleet(compose: Compose, evidence: JsonEvidence) -> dict[str, Any]:
+    """Run exactly the instances the plan says: start those it names, stop the spares, wait for the balancer."""
+    fleet = PlannedFleet(evidence)
+    _say(f"running {fleet.size} instances; spares: {', '.join(fleet.spares) or 'none'}")
+    if fleet.spares:
+        compose.stop(fleet.spares)
+    compose.start(fleet.instances)
+    wait_for_members(fleet.size)
+    return {"experiment": "set-fleet", "instances": fleet.instances, "spares": fleet.spares}
+```
+
+`set_fleet` stops the spare instances, starts the planned ones and waits until Envoy counts exactly the fleet's size. `main` has two new subcommands, `preflight` and `set-fleet`.
+
 ### `interfaces/capacity_cli.py`: the plan, the report and the review
 
 ```python
@@ -690,20 +883,21 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from capacity.application import capacity_report, launch_decision
+from capacity.application.experiments import COMPOSE_FLEET
 from capacity.application.readiness import Reviewer
 from capacity.domain.plan import plan_capacity
 from capacity.infrastructure.logging_setup import configure_logging
 from capacity.infrastructure.project_files import FileSystemProject, JsonEvidence, SloFilesCatalog, YamlChecklist
+from capacity.infrastructure.slo_files import render_fleet_files
 
 _MEASURED = re.compile(r"<!-- measured -->.*?<!-- /measured -->", re.DOTALL)
 PEAK_RPS = 1000.0
 GROWTH = 2.0
 ZONES = 3
-COMPOSE_FLEET = 8  # instances defined in docker-compose.yml (3/3/2 over three zones)
 
 ```
 
-`_MEASURED` is a regular expression that finds the text between `<!-- measured -->` and `<!-- /measured -->` (with `DOTALL`, so `.` also matches line breaks). The constants are the lesson's facts: a peak of 1,000, growth of 2, three zones and the eight instances `docker-compose.yml` defines.
+`_MEASURED` is a regular expression that finds the text between `<!-- measured -->` and `<!-- /measured -->` (with `DOTALL`, so `.` also matches line breaks). The constants are the lesson's facts: a peak of 1,000, growth of 2, three zones and the nine instances `docker-compose.yml` defines (the plan may need fewer; it must not need more).
 
 ```python
 def cmd_plan(args: argparse.Namespace) -> int:
@@ -737,6 +931,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
         },
     )
     print(f"verified by running {plan.surviving_after_zone_loss} instances at {plan.future_peak_rps:g} rps: {verified}")
+    for path, text in render_fleet_files(
+        plan.instances_for_peak, plan.total_instances, plan.surviving_after_zone_loss
+    ).items():
+        (Path(args.root) / path).write_text(text, encoding="utf-8")
+    print("wrote the fleet alert thresholds: page below", plan.instances_for_peak, "ticket below", plan.total_instances)
     if plan.total_instances > COMPOSE_FLEET:
         print(
             f"the plan needs {plan.total_instances} instances but docker-compose.yml defines {COMPOSE_FLEET}: add "
@@ -795,6 +994,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     plan = sub.add_parser("plan", help="size the fleet from the measured safe load")
     plan.add_argument("--evidence", default="docs/evidence")
+    plan.add_argument("--root", default=".", help="the repository, where the fleet alert files are written")
     plan.add_argument("--peak", type=float, default=PEAK_RPS, help="today's peak requests per second")
     plan.add_argument("--growth", type=float, default=GROWTH, help="growth factor over six months")
     plan.add_argument("--safe-rps", type=float, default=0.0, help="override the measured safe load per instance")
@@ -818,6 +1018,18 @@ def main(argv: Sequence[str] | None = None) -> None:
 ```
 
 `build_parser` defines `plan`, `report` and `review` with their options, each setting its `handler` default. `main` configures logging, parses the arguments and exits with the handler's status.
+
+#### The plan also writes the fleet alert thresholds
+
+```python
+for path, text in render_fleet_files(
+    plan.instances_for_peak, plan.total_instances, plan.surviving_after_zone_loss
+).items():
+    (Path(args.root) / path).write_text(text, encoding="utf-8")
+print("wrote the fleet alert thresholds: page below", plan.instances_for_peak, "ticket below", plan.total_instances)
+```
+
+After saving the plan, `cmd_plan` renders the fleet alert rules and their promtool replay for the plan's numbers and writes them under `--root` (the repository, `.` by default). `COMPOSE_FLEET` now comes from the application layer and is 9, so the command only fails when the plan needs more than nine instances.
 
 ## Try it yourself
 

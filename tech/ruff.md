@@ -30,6 +30,7 @@ Consistent code is easier to read and review, and a linter catches whole classes
 line-length = 120
 target-version = "py312"
 src = ["src", "tests"]
+extend-exclude = ["tech"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "N", "C4", "RUF", "PT", "ASYNC", "D100", "D101", "D103", "D104"]
@@ -80,6 +81,10 @@ format: $(STAMP) ## apply ruff's formatting and safe fixes
 ```
 
 `ruff check .` and `ruff format --check .` are the checks; `format` uses `--fix` and plain `format` to change files.
+
+### Keeping ruff out of the notes
+
+`extend-exclude = ["tech"]` under `[tool.ruff]` tells ruff to skip the `tech/` folder. Recent ruff versions also format Python code blocks inside Markdown files, which would rewrite the quoted source in these notes so that it no longer matches the code; excluding the folder keeps the quotes exact.
 
 ## Try it yourself
 

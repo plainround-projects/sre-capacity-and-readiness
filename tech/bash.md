@@ -112,7 +112,7 @@ help: ## list the targets
 A pipeline: `grep` finds the matching lines, `sed` rewrites each, `sort` sorts. `-E` means extended regular expressions.
 
 ```make
-up: $(STAMP) ## build and start the fleet: 8 instances in 3 zones, Envoy, the ledger, PostgreSQL, Prometheus
+up: $(STAMP) ## build and start the fleet: 9 instances in 3 zones (the plan says how many run), Envoy, the ledger, PostgreSQL, Prometheus
 	docker compose up -d --build --wait
 	@echo "edge http://localhost:$${EDGE_PORT:-47280}/work   Envoy admin http://localhost:$${ENVOY_ADMIN_PORT:-47281}   Prometheus http://localhost:$${PROMETHEUS_PORT:-47290}"
 ```
@@ -129,7 +129,9 @@ reset-fleet: ## recreate every instance without the shared dependency, at versio
 ```make
 knee: $(STAMP) ## step the load up on one instance until p99 climbs; names the saturated resource (STEP_SECONDS per step)
 	mkdir -p $(EVIDENCE)
-	$(LOADTEST) knee --target http://app-a1:8080 --ops http://app-a1:9101 --step-seconds $(STEP_SECONDS) > $(EVIDENCE)/knee.json
+	$(LOADTEST) knee --target http://app-a1:8080 --ops http://app-a1:9101 --step-seconds $(STEP_SECONDS) > $(EVIDENCE)/knee.json.tmp \
+	  || { rm -f $(EVIDENCE)/knee.json.tmp; exit 1; }
+	mv $(EVIDENCE)/knee.json.tmp $(EVIDENCE)/knee.json
 	@$(PY) -c "import json; d=json.load(open('$(EVIDENCE)/knee.json')); print(json.dumps({k: d[k] for k in ('knee','safe_rps','margin_below_knee')}, indent=2)); [print(s) for s in d['steps']]"
 ```
 
@@ -138,7 +140,9 @@ knee: $(STAMP) ## step the load up on one instance until p99 climbs; names the s
 ```make
 soak: $(STAMP) ## hold one instance at the safe load for SOAK_SECONDS and check p99 in every window
 	$(LOADTEST) soak --target http://app-a1:8080 --rps $$($(PY) -c "import json; print(json.load(open('$(EVIDENCE)/knee.json'))['safe_rps'])") \
-	  --seconds $(SOAK_SECONDS) --label soak > $(EVIDENCE)/soak.json
+	  --seconds $(SOAK_SECONDS) --label soak --ops http://app-a1:9101 > $(EVIDENCE)/soak.json.tmp \
+	  || { rm -f $(EVIDENCE)/soak.json.tmp; exit 1; }
+	mv $(EVIDENCE)/soak.json.tmp $(EVIDENCE)/soak.json
 	@cat $(EVIDENCE)/soak.json
 ```
 

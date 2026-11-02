@@ -177,6 +177,7 @@ from capacity.domain.errors import InvalidPlanError, NoKneeError
 
 BASELINE_STEPS = 3
 RISE_FACTOR = 3.0
+BASELINE_FLOOR_MS = 15.0  # a few milliseconds of jitter is the host's, not the service's: a rise must clear 3x this
 STEP_ROUNDING = 25
 
 
@@ -223,8 +224,12 @@ class Knee:
 
 ```python
 def looks_broken(step: StepResult, baseline_p99_ms: float, rise_factor: float = RISE_FACTOR) -> bool:
-    """True when the step's p99 is more than `rise_factor` times the flat baseline, or it fails over 1% of requests."""
-    return step.p99_ms > rise_factor * baseline_p99_ms or step.error_rate > 0.01
+    """True when the step's p99 is more than `rise_factor` times the flat baseline, or it fails over 1% of requests.
+
+    The baseline counts as at least `BASELINE_FLOOR_MS`: on a shared host a 5 ms baseline is timer and scheduler noise,
+    and tripling noise is not a knee.
+    """
+    return step.p99_ms > rise_factor * max(baseline_p99_ms, BASELINE_FLOOR_MS) or step.error_rate > 0.01
 
 
 def baseline_p99(steps: list[StepResult]) -> float:
@@ -267,6 +272,10 @@ def safe_load(knee: Knee, margin: float = 0.25, step: int = STEP_ROUNDING) -> in
 ```
 
 `looks_broken(step, baseline, rise_factor)` is true when the step's p99 is more than three times the baseline or it failed more than 1% of requests. `baseline_p99` is the median p99 of the first three steps. `find_knee` sorts the steps by target load, computes the baseline, and returns the first step that looks broken **and stays broken** on the next step (a spike that goes away again is noise, not a knee; the last step needs no successor). It raises `NoKneeError` when there are three steps or fewer or no sharp rise ever persists. `safe_load(knee, margin, step)` is the knee times (1 − margin), rounded **down** to a multiple of 25, never below 25; the margin (25% by default) is a judgment call: it covers measurement noise, a different traffic mix and a busy neighbor.
+
+#### The floor under the baseline
+
+`BASELINE_FLOOR_MS = 15.0` (the line above `looks_broken`) and the `max(baseline_p99_ms, BASELINE_FLOOR_MS)` in its body mean a step only counts as broken when its p99 is more than three times **at least 15 ms**, so more than 45 ms. Why: on a shared host a baseline of 4 or 5 ms is timer and scheduler noise, and p99 of 12, 19 and 28 ms at rising load, which is only queueing and jitter, is more than three times a 5 ms baseline. A real knee is a rise that passes the SLO's own order of magnitude (50 ms). Two unit tests pin it: gentle growth from a 4 ms baseline is not a knee, and a jump to 60 ms is.
 
 ### `domain/plan.py`: the fleet
 

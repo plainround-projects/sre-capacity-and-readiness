@@ -171,6 +171,7 @@ from capacity.domain.knee import BASELINE_STEPS, Knee, StepResult, baseline_p99,
 from capacity.domain.latency import Sample, summarize, window_p99s
 
 GENERATOR_LAG_LIMIT_MS = 5.0
+SATURATED_CPU = 0.9  # a core this busy is saturated; a run that spiked with the core idler than this was disturbed
 
 ```
 
@@ -186,6 +187,22 @@ class KneeReport:
     safe_rps: int | None
     margin: float
     generator_lag_p99_ms: float
+
+    @property
+    def problem(self) -> str | None:
+        """Why these numbers cannot be trusted, or None. An untrustworthy knee is never saved as evidence."""
+        if self.generator_lag_p99_ms > GENERATOR_LAG_LIMIT_MS:
+            return f"the load generator itself was late by {self.generator_lag_p99_ms:.1f} ms at p99"
+        if self.knee is None:
+            return "the load never reached a knee"
+        if self.knee.saturated_resource != "cpu":
+            used = self.knee.cpu_utilization_at_knee
+            share = "an unmeasured share" if used is None else f"{used * 100:.0f}%"
+            return (
+                f"p99 rose at {self.knee.knee_rps:g} rps with {share} of the core in use, so the host, not the "
+                "instance, ran short of something"
+            )
+        return None
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready, with the resource named."""
@@ -309,6 +326,24 @@ class RunReport:
         """True when no error occurred and no window's p99 exceeded the SLO."""
         return self.result.errors == 0 and all(p99 <= self.slo_p99_ms for p99 in self.window_p99_ms)
 
+    @property
+    def spiked(self) -> bool:
+        """True when a window left the SLO although no request failed: saturation, or a disturbed machine."""
+        return self.result.errors == 0 and not self.within_slo
+
+    @property
+    def problem(self) -> str | None:
+        """Why these numbers cannot be trusted, or None. An untrustworthy run is never saved as evidence."""
+        if self.generator_lag_p99_ms > GENERATOR_LAG_LIMIT_MS:
+            return f"the load generator itself was late by {self.generator_lag_p99_ms:.1f} ms at p99"
+        used = self.result.cpu_utilization
+        if self.spiked and used is not None and used < SATURATED_CPU:
+            return (
+                f"a window's p99 left the SLO with no errors while the instance used only {used * 100:.0f}% of its "
+                "core, so the host, not the instance, was the cause"
+            )
+        return None
+
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready."""
         return {
@@ -327,22 +362,141 @@ class RunReport:
 
 ```python
 async def timed_run(
-    runner: OpenLoopRunner, label: str, rps: float, seconds: float, slo_p99_ms: float, window_s: float = 10.0
+    runner: OpenLoopRunner,
+    label: str,
+    rps: float,
+    seconds: float,
+    slo_p99_ms: float,
+    window_s: float = 10.0,
+    probe: CpuProbe | None = None,
+    attempts: int = 1,
 ) -> RunReport:
-    """Run at `rps` for `seconds` and report overall and per-window p99, so slow drift cannot hide in an average."""
-    samples, lag = await runner.run(rps, seconds)
-    return _report(label, rps, seconds, slo_p99_ms, window_s, samples, lag)
+    """Run at `rps` for `seconds` and report overall and per-window p99, so slow drift cannot hide in an average.
+
+    A run that spiked with no failed request (or with a late generator) is run again, up to `attempts` times, and the
+    last one is reported: a real shortage is there every time, a stall on a shared machine is not.
+    """
+    report: RunReport | None = None
+    for attempt in range(1, attempts + 1):
+        before = await probe.cpu_seconds() if probe else None
+        samples, lag = await runner.run(rps, seconds)
+        after = await probe.cpu_seconds() if probe else None
+        utilization = None if before is None or after is None else (after - before) / seconds
+        report = _report(label, rps, seconds, slo_p99_ms, window_s, samples, lag, utilization)
+        report = replace(report, result=replace(report.result, attempts=attempt))
+        if lag <= GENERATOR_LAG_LIMIT_MS and not report.spiked:
+            break
+    assert report is not None
+    return report
 
 
 def _report(
-    label: str, rps: float, seconds: float, slo: float, window_s: float, samples: list[Sample], lag: float
+    label: str,
+    rps: float,
+    seconds: float,
+    slo: float,
+    window_s: float,
+    samples: list[Sample],
+    lag: float,
+    utilization: float | None,
 ) -> RunReport:
     return RunReport(
-        label, rps, seconds, summarize(samples, rps, seconds), tuple(window_p99s(samples, window_s)), slo, lag
+        label,
+        rps,
+        seconds,
+        summarize(samples, rps, seconds, utilization),
+        tuple(window_p99s(samples, window_s)),
+        slo,
+        lag,
     )
 ```
 
 `timed_run` runs at the given rate for the given seconds and builds the report; `_report` summarizes the samples and the per-window p99s (windows of 10 seconds by default).
+
+#### Runs that cannot be trusted
+
+A load test on a shared machine can produce a clean-looking number that describes the machine. The use case now says so itself.
+
+```python
+SATURATED_CPU = 0.9  # a core this busy is saturated; a run that spiked with the core idler than this was disturbed
+```
+
+`SATURATED_CPU = 0.9` is the share of a core above which the instance counts as saturated; below it, a latency problem is probably not the instance's. `KneeReport.problem` and `RunReport.problem` return a sentence saying why the numbers cannot be trusted, or `None`:
+
+```python
+def problem(self) -> str | None:
+    """Why these numbers cannot be trusted, or None. An untrustworthy knee is never saved as evidence."""
+    if self.generator_lag_p99_ms > GENERATOR_LAG_LIMIT_MS:
+        return f"the load generator itself was late by {self.generator_lag_p99_ms:.1f} ms at p99"
+    if self.knee is None:
+        return "the load never reached a knee"
+    if self.knee.saturated_resource != "cpu":
+        used = self.knee.cpu_utilization_at_knee
+        share = "an unmeasured share" if used is None else f"{used * 100:.0f}%"
+        return (
+            f"p99 rose at {self.knee.knee_rps:g} rps with {share} of the core in use, so the host, not the "
+            "instance, ran short of something"
+        )
+    return None
+```
+
+For a knee: the load generator itself was late by more than 5 ms at p99 (it was not sending on schedule, so the latency includes its own queueing); no knee was found; or a knee was found where the instance used less than 90% of its core, so something else (the host) ran short.
+
+```python
+def spiked(self) -> bool:
+    """True when a window left the SLO although no request failed: saturation, or a disturbed machine."""
+    return self.result.errors == 0 and not self.within_slo
+```
+
+For a timed run, `spiked` is true when a window's p99 left the SLO although no request failed. A real shortage of capacity looks the same, so the second property needs more evidence:
+
+```python
+def problem(self) -> str | None:
+    """Why these numbers cannot be trusted, or None. An untrustworthy run is never saved as evidence."""
+    if self.generator_lag_p99_ms > GENERATOR_LAG_LIMIT_MS:
+        return f"the load generator itself was late by {self.generator_lag_p99_ms:.1f} ms at p99"
+    used = self.result.cpu_utilization
+    if self.spiked and used is not None and used < SATURATED_CPU:
+        return (
+            f"a window's p99 left the SLO with no errors while the instance used only {used * 100:.0f}% of its "
+            "core, so the host, not the instance, was the cause"
+        )
+    return None
+```
+
+A late generator is a problem; so is a spike with no errors while the instance used under 90% of its core (the probe measured it), which says the host, not the instance, caused the spike.
+
+```python
+async def timed_run(
+    runner: OpenLoopRunner,
+    label: str,
+    rps: float,
+    seconds: float,
+    slo_p99_ms: float,
+    window_s: float = 10.0,
+    probe: CpuProbe | None = None,
+    attempts: int = 1,
+) -> RunReport:
+    """Run at `rps` for `seconds` and report overall and per-window p99, so slow drift cannot hide in an average.
+
+    A run that spiked with no failed request (or with a late generator) is run again, up to `attempts` times, and the
+    last one is reported: a real shortage is there every time, a stall on a shared machine is not.
+    """
+    report: RunReport | None = None
+    for attempt in range(1, attempts + 1):
+        before = await probe.cpu_seconds() if probe else None
+        samples, lag = await runner.run(rps, seconds)
+        after = await probe.cpu_seconds() if probe else None
+        utilization = None if before is None or after is None else (after - before) / seconds
+        report = _report(label, rps, seconds, slo_p99_ms, window_s, samples, lag, utilization)
+        report = replace(report, result=replace(report.result, attempts=attempt))
+        if lag <= GENERATOR_LAG_LIMIT_MS and not report.spiked:
+            break
+    assert report is not None
+    return report
+```
+
+`timed_run` now takes an optional CPU `probe` and a number of `attempts`. It runs the load, reads the CPU before and after, builds the report with the utilization and records which attempt this was. It stops at the first run whose generator was on time and that did not spike without errors; otherwise it runs again, up to `attempts` times, and reports the last. A stall on a shared machine does not repeat; a real shortage does. The `assert report is not None` tells the type checker that the loop ran at least once.
 
 ### `application/experiments.py`: pool-size decisions
 
@@ -352,10 +506,13 @@ def _report(
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from typing import Any
 
 POOL_HEADROOM = 1.25
 POOL_STEP = 5
+ZONES = ("a", "b", "c")
+COMPOSE_FLEET = 9  # instances docker-compose.yml defines: three in each zone
 
 
 def naive_pool_size(peak_rps: float, hold_ms: float) -> int:
@@ -381,6 +538,36 @@ def choose_pool_size(results: list[dict[str, Any]]) -> int | None:
 ```
 
 `POOL_HEADROOM = 1.25` is the 25% margin and `POOL_STEP = 5` the rounding step. `naive_pool_size` is the textbook rule, peak requests per second times the seconds a request holds a connection (hold time in milliseconds divided by 1,000), rounded up with `math.ceil`. `sweep_sizes` lists the pool sizes to try: the naive size, then 4, 10 and 20 more. `choose_pool_size` sorts the sizes whose run held the SLO, takes the smallest, multiplies by 1.25, rounds **up** to a multiple of five and returns it (or `None` when no size held). The smallest size that holds is the pool's knee, not a place to operate.
+
+#### Which instances run
+
+```python
+ZONES = ("a", "b", "c")
+COMPOSE_FLEET = 9  # instances docker-compose.yml defines: three in each zone
+```
+
+`ZONES` are the three zone letters and `COMPOSE_FLEET` the nine instances `docker-compose.yml` defines.
+
+```python
+def fleet_instances(distribution: Sequence[int]) -> list[str]:
+    """The service names of a fleet spread as `distribution` says over zones a, b and c, such as (3, 3, 2)."""
+    return [
+        f"app-{zone}{number}"
+        for zone, count in zip(ZONES, distribution, strict=False)
+        for number in range(1, count + 1)
+    ]
+```
+
+`fleet_instances((3, 3, 2))` pairs each zone letter with its count (`zip`, with `strict=False` because a plan may give fewer counts than there are zones) and numbers the instances from 1: `app-a1` to `app-c2`.
+
+```python
+def spare_instances(distribution: Sequence[int]) -> list[str]:
+    """The instances compose defines that the plan does not run."""
+    wanted = set(fleet_instances(distribution))
+    return [name for name in fleet_instances((COMPOSE_FLEET // len(ZONES),) * len(ZONES)) if name not in wanted]
+```
+
+`spare_instances` is every instance compose defines (a fleet of 3 in each of the 3 zones) that the plan does not use: for `(3, 3, 2)` it is `["app-c3"]`. `make set-fleet` stops them.
 
 ### `application/sli.py`: counting events
 

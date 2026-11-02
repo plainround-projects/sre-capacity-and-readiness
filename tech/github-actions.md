@@ -85,7 +85,7 @@ No Python is needed: `make test-rules` only runs Docker containers, and Docker i
 
 ### Job `e2e`
 
-`make up` builds and starts the Compose stack (eight instances, Envoy, the ledger, PostgreSQL, Prometheus) and waits until it is healthy; `make test-e2e` runs smoke tests against the running fleet (Envoy answers, the instances answer, Prometheus scrapes its targets, the metric names the dashboard and alerts use really exist); the last step, `make down`, has `if: always()` so containers are removed even if the tests failed. The long experiments (`make run`) are not part of CI: they need several free CPU cores and about twenty minutes.
+`make up` builds and starts the Compose stack (nine instances, Envoy, the ledger, PostgreSQL, Prometheus) and waits until it is healthy; `make test-e2e` runs smoke tests against the running fleet (Envoy answers, the instances answer, Prometheus scrapes its targets, the metric names the dashboard and alerts use really exist); the last step, `make down`, has `if: always()` so containers are removed even if the tests failed. The long experiments (`make run`) are not part of CI: they need several free CPU cores and about twenty minutes.
 
 ## Try it yourself
 

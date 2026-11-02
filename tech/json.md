@@ -68,6 +68,22 @@ class KneeReport:
     margin: float
     generator_lag_p99_ms: float
 
+    @property
+    def problem(self) -> str | None:
+        """Why these numbers cannot be trusted, or None. An untrustworthy knee is never saved as evidence."""
+        if self.generator_lag_p99_ms > GENERATOR_LAG_LIMIT_MS:
+            return f"the load generator itself was late by {self.generator_lag_p99_ms:.1f} ms at p99"
+        if self.knee is None:
+            return "the load never reached a knee"
+        if self.knee.saturated_resource != "cpu":
+            used = self.knee.cpu_utilization_at_knee
+            share = "an unmeasured share" if used is None else f"{used * 100:.0f}%"
+            return (
+                f"p99 rose at {self.knee.knee_rps:g} rps with {share} of the core in use, so the host, not the "
+                "instance, ran short of something"
+            )
+        return None
+
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready, with the resource named."""
         return {
@@ -111,13 +127,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     """Entry point of `capacity-loadtest`."""
     configure_logging("WARNING")
     args = build_parser().parse_args(argv)
-    result = asyncio.run(_knee(args) if args.command == "knee" else _timed(args))
-    if result["generator_lag_p99_ms"] > GENERATOR_LAG_LIMIT_MS:
-        print(
-            f"warning: the load generator itself was late by {result['generator_lag_p99_ms']} ms at p99; "
-            "the numbers include its own queueing",
-            file=sys.stderr,
-        )
+    result, problem = asyncio.run(_knee(args) if args.command == "knee" else _timed(args))
+    if problem is not None:
+        sys.exit(f"not a valid measurement, nothing written: {problem}. Run again when the machine is quiet.")
     print(json.dumps(result, indent=2))
 
 ```

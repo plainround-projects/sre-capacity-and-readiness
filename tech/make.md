@@ -54,7 +54,7 @@ export STEP_SECONDS ?= 10
 export SOAK_SECONDS ?= 120
 CHECK_SECONDS ?= 40
 
-.PHONY: help install up reset-fleet run knee soak plan plan-doc full-fleet zone-loss pool-sweep dependency-test rollout-test restore-test review test-measurements \
+.PHONY: help install preflight clean-evidence set-fleet up reset-fleet run knee soak plan plan-doc full-fleet zone-loss pool-sweep dependency-test rollout-test restore-test review test-measurements \
         psql rules rules-check lint format test test-unit test-rules test-integration test-e2e audit check lock docker-build down clean
 ```
 
@@ -89,20 +89,29 @@ install: $(STAMP) ## create .venv from the lock file
 ### `up`, `reset-fleet` and `run`
 
 ```make
-up: $(STAMP) ## build and start the fleet: 8 instances in 3 zones, Envoy, the ledger, PostgreSQL, Prometheus
+up: $(STAMP) ## build and start the fleet: 9 instances in 3 zones (the plan says how many run), Envoy, the ledger, PostgreSQL, Prometheus
 	docker compose up -d --build --wait
 	@echo "edge http://localhost:$${EDGE_PORT:-47280}/work   Envoy admin http://localhost:$${ENVOY_ADMIN_PORT:-47281}   Prometheus http://localhost:$${PROMETHEUS_PORT:-47290}"
 
+preflight: $(STAMP) ## refuse to measure when the machine is busy (one-minute load per CPU above 0.6, or MAX_LOAD)
+	$(EXPERIMENTS) preflight
+
+clean-evidence: ## remove the load-dependent evidence, so a run never mixes old and new measurements
+	rm -f $(EVIDENCE)/*.json
+
+set-fleet: $(STAMP) ## run exactly the instances the plan says and stop the spares
+	$(EXPERIMENTS) set-fleet
+
 reset-fleet: ## recreate every instance without the shared dependency, at version v1
-	LEDGER_URL= APP_VERSION=v1 docker compose up -d --no-deps --force-recreate --wait app-a1 app-a2 app-a3 app-b1 app-b2 app-b3 app-c1 app-c2
+	LEDGER_URL= APP_VERSION=v1 docker compose up -d --no-deps --force-recreate --wait app-a1 app-a2 app-a3 app-b1 app-b2 app-b3 app-c1 app-c2 app-c3
 
 # The whole story, in the lesson's order: the knee, the safe load, the plan, the fleet and its lost zone, the next
 # bottleneck, the failures the review needs evidence for, and the review.
-run: up reset-fleet knee soak plan full-fleet zone-loss pool-sweep dependency-test rollout-test restore-test plan-doc review test-measurements ## the whole capacity and readiness exercise (about 20 minutes on a quiet machine)
+run: preflight clean-evidence up reset-fleet knee soak plan set-fleet full-fleet zone-loss pool-sweep dependency-test rollout-test restore-test plan-doc review test-measurements ## the whole capacity and readiness exercise (about 20 minutes on a quiet machine)
 ```
 
 - `up` builds and starts the fleet and waits until every health check passes (`--wait`).
-- `reset-fleet` recreates all eight instances with no shared dependency (`LEDGER_URL=` empty) at release `v1`. The two variable assignments in front of the command apply only to it (see the Bash note). It is the starting state for the knee test, because an earlier run may have left the fleet pointing at the ledger or at `v2`.
+- `reset-fleet` recreates all nine instances with no shared dependency (`LEDGER_URL=` empty) at release `v1`. The two variable assignments in front of the command apply only to it (see the Bash note). It is the starting state for the knee test, because an earlier run may have left the fleet pointing at the ledger or at `v2`.
 - `run` lists `up reset-fleet knee soak plan full-fleet zone-loss pool-sweep dependency-test rollout-test restore-test plan-doc review test-measurements` and has no commands of its own: Make runs them left to right. The `##` description notes it takes about twenty minutes on a quiet machine.
 
 ### The load tests
@@ -110,12 +119,16 @@ run: up reset-fleet knee soak plan full-fleet zone-loss pool-sweep dependency-te
 ```make
 knee: $(STAMP) ## step the load up on one instance until p99 climbs; names the saturated resource (STEP_SECONDS per step)
 	mkdir -p $(EVIDENCE)
-	$(LOADTEST) knee --target http://app-a1:8080 --ops http://app-a1:9101 --step-seconds $(STEP_SECONDS) > $(EVIDENCE)/knee.json
+	$(LOADTEST) knee --target http://app-a1:8080 --ops http://app-a1:9101 --step-seconds $(STEP_SECONDS) > $(EVIDENCE)/knee.json.tmp \
+	  || { rm -f $(EVIDENCE)/knee.json.tmp; exit 1; }
+	mv $(EVIDENCE)/knee.json.tmp $(EVIDENCE)/knee.json
 	@$(PY) -c "import json; d=json.load(open('$(EVIDENCE)/knee.json')); print(json.dumps({k: d[k] for k in ('knee','safe_rps','margin_below_knee')}, indent=2)); [print(s) for s in d['steps']]"
 
 soak: $(STAMP) ## hold one instance at the safe load for SOAK_SECONDS and check p99 in every window
 	$(LOADTEST) soak --target http://app-a1:8080 --rps $$($(PY) -c "import json; print(json.load(open('$(EVIDENCE)/knee.json'))['safe_rps'])") \
-	  --seconds $(SOAK_SECONDS) --label soak > $(EVIDENCE)/soak.json
+	  --seconds $(SOAK_SECONDS) --label soak --ops http://app-a1:9101 > $(EVIDENCE)/soak.json.tmp \
+	  || { rm -f $(EVIDENCE)/soak.json.tmp; exit 1; }
+	mv $(EVIDENCE)/soak.json.tmp $(EVIDENCE)/soak.json
 	@cat $(EVIDENCE)/soak.json
 ```
 
@@ -128,10 +141,10 @@ soak: $(STAMP) ## hold one instance at the safe load for SOAK_SECONDS and check 
 plan: $(STAMP) ## size the fleet from the measured safe load: the formula, the inputs, the result
 	$(VENV)/bin/capacity plan
 
-full-fleet: $(STAMP) ## run the projected peak (2,000 rps) on all 8 instances, no shared dependency yet
+full-fleet: $(STAMP) ## run the projected peak (2,000 rps) on the planned fleet, no shared dependency yet
 	$(EXPERIMENTS) full-fleet --seconds $(CHECK_SECONDS)
 
-zone-loss: $(STAMP) ## stop the largest zone and run the projected peak on the 5 survivors
+zone-loss: $(STAMP) ## stop the largest zone and run the projected peak on the survivors
 	$(EXPERIMENTS) zone-loss --seconds $(CHECK_SECONDS)
 
 pool-sweep: $(STAMP) ## reintroduce the shared ledger and step its connection pool up until the SLO holds
@@ -154,7 +167,7 @@ review: $(STAMP) ## the readiness review: every item PASS, FAIL or ACCEPTED RISK
 ```
 
 - `plan` computes the fleet size from the measured safe load (`capacity plan`) and saves `plan.json`.
-- `full-fleet`, `zone-loss`, `pool-sweep` each call `capacity-experiments` with `--seconds $(CHECK_SECONDS)`: run the projected peak (2,000 requests a second) on all eight instances; stop the largest zone and run it on the five survivors; step the shared ledger's connection pool up until the SLO holds.
+- `full-fleet`, `zone-loss`, `pool-sweep` each call `capacity-experiments` with `--seconds $(CHECK_SECONDS)`: run the projected peak (2,000 requests a second) on the instances the plan says; stop the largest zone and run it on the survivors; step the shared ledger's connection pool up until the SLO holds.
 - `dependency-test` freezes the ledger and checks requests fail fast; `rollout-test` rolls every instance to v2 and back under load; `restore-test` backs the ledger up, restores it into a scratch database and compares.
 - `plan-doc` writes `docs/capacity-plan.md` (and the measured numbers in the runbooks) from the evidence; `review` runs the readiness review and writes `docs/launch-decision.md`.
 
@@ -223,6 +236,35 @@ clean: down
 
 `psql` opens the database client; `rules` and `rules-check` regenerate and verify the Prometheus rules; `lint` runs ruff, mypy and import-linter and the rules check; `format` fixes style; `test-unit` runs pytest **excluding** the `measurements` marker and enforces 95% coverage on the logic layers; `test-rules` runs `promtool` in Docker; `test-measurements` runs only the tests that hold the committed measurements to the lesson's Done when lines (they need `make run` first); `test-integration` and `test-e2e` select by marker; `audit`, `check`, `lock`, `docker-build`, `down` and `clean` are housekeeping as in the other projects.
 
+### The targets that make a run trustworthy
+
+```python
+preflight: $(STAMP) ## refuse to measure when the machine is busy (one-minute load per CPU above 0.6, or MAX_LOAD)
+	$(EXPERIMENTS) preflight
+
+clean-evidence: ## remove the load-dependent evidence, so a run never mixes old and new measurements
+	rm -f $(EVIDENCE)/*.json
+
+set-fleet: $(STAMP) ## run exactly the instances the plan says and stop the spares
+	$(EXPERIMENTS) set-fleet
+```
+
+- `preflight` runs `capacity-experiments preflight`, which reads the machine's one-minute load average and stops the run when it is above 0.6 per CPU (or above `MAX_LOAD` if that variable is set). Measuring on a busy machine produces numbers that describe the machine; refusing at the start costs seconds, finding out at the end costs twenty minutes.
+- `clean-evidence` deletes every `docs/evidence/*.json` first, so a run never mixes old and new measurements.
+- `set-fleet` runs `capacity-experiments set-fleet`: it starts the instances `plan.json` names and stops the spares, then waits until Envoy counts exactly that many healthy members.
+
+The `run` line now begins with `preflight clean-evidence up reset-fleet`, and `plan set-fleet` sit between `soak` and `full-fleet`.
+
+```python
+knee: $(STAMP) ## step the load up on one instance until p99 climbs; names the saturated resource (STEP_SECONDS per step)
+	mkdir -p $(EVIDENCE)
+	$(LOADTEST) knee --target http://app-a1:8080 --ops http://app-a1:9101 --step-seconds $(STEP_SECONDS) > $(EVIDENCE)/knee.json.tmp \
+	  || { rm -f $(EVIDENCE)/knee.json.tmp; exit 1; }
+	mv $(EVIDENCE)/knee.json.tmp $(EVIDENCE)/knee.json
+```
+
+The knee test writes to `knee.json.tmp` and renames it to `knee.json` only when the command succeeded; when the load generator decides the measurement is not valid (see the interfaces note) it exits with an error and the `||` branch deletes the temporary file. `mv` is atomic on one file system, so a reader never sees half a file. The soak recipe does the same with `soak.json.tmp`, and also passes `--ops http://app-a1:9101` so the soak can read the instance's CPU use.
+
 ## Try it yourself
 
 1. `make help` lists every target with its description, sorted.
@@ -249,7 +291,7 @@ clean: down
 4. What does `export STEP_SECONDS ?= 10` mean?
    *Answer: set it to 10 unless it is already set, and pass it to every command Make starts.*
 5. Why does `reset-fleet` exist?
-   *Answer: to return all eight instances to v1 with no shared dependency before the knee test.*
+   *Answer: to return all nine instances to v1 with no shared dependency before the knee test.*
 
 ## Further reading
 

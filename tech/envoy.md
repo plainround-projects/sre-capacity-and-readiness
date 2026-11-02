@@ -15,7 +15,7 @@ Words you will meet:
 
 ## Why this repository uses it
 
-Two reasons. First, the fleet needs a load balancer to spread requests over eight instances and to stop sending requests to an instance that is down (the zone-loss test stops three of them). Second, the lesson says SLIs belong at the edge: Envoy counts every response and times it, so its numbers are what a user experiences, including the effect of retries and of failed health checks. The SLO rules read Envoy's metrics, not the instances'.
+Two reasons. First, the fleet needs a load balancer to spread requests over the running instances and to stop sending requests to an instance that is down (the zone-loss test stops the whole largest zone). Second, the lesson says SLIs belong at the edge: Envoy counts every response and times it, so its numbers are what a user experiences, including the effect of retries and of failed health checks. The SLO rules read Envoy's metrics, not the instances'.
 
 ## Where it appears
 
@@ -107,6 +107,10 @@ clusters:
     dns_lookup_family: V4_ONLY
     connect_timeout: 0.5s
     lb_policy: ROUND_ROBIN
+    # A recreated instance gets a new address. By default Envoy keeps the old address as a member for as long as it
+    # still passes its health check, so the healthy-member count (and the fleet alerts that read it) would include
+    # instances that no longer exist. Drop a host as soon as DNS stops returning it.
+    ignore_health_on_host_removal: true
     circuit_breakers:
       thresholds:
         - max_connections: 4096
@@ -149,7 +153,7 @@ load_assignment:
         - endpoint: {address: {socket_address: {address: app-c2, port_value: 8080}}, health_check_config: {port_value: 9101}}
 ```
 
-`load_assignment` lists the endpoints. Each `locality: {zone: a}` groups instances by zone, and each `lb_endpoints` entry gives an address (`app-a1`, a Compose service name) and `port_value: 8080`. `health_check_config: {port_value: 9101}` tells Envoy to send the health check to port 9101 (the instance's ops port), not the traffic port. The eight endpoints are the 3/3/2 fleet.
+`load_assignment` lists the endpoints. Each `locality: {zone: a}` groups instances by zone, and each `lb_endpoints` entry gives an address (`app-a1`, a Compose service name) and `port_value: 8080`. `health_check_config: {port_value: 9101}` tells Envoy to send the health check to port 9101 (the instance's ops port), not the traffic port. The nine endpoints are the three zones of three; the plan decides how many of them run, and a stopped instance's name no longer resolves, so Envoy drops it.
 
 ### How the numbers are read
 
@@ -172,11 +176,11 @@ Envoy's request-time histogram is in milliseconds (`EDGE_LATENCY_BUCKETS_MS`), u
 
 ```python
 def healthy_members() -> int:
-    """Healthy instances according to the load balancer, or 0 when it cannot be reached."""
+    """Hosts the load balancer lists as healthy and not pending removal, or 0 when it cannot be reached."""
     try:
-        with urllib.request.urlopen(HEALTHY_MEMBERS_URL, timeout=3) as response:
-            return int(response.read().decode().strip().rsplit(":", 1)[1])
-    except (urllib.error.URLError, TimeoutError, ValueError, IndexError):
+        with urllib.request.urlopen(CLUSTERS_URL, timeout=3) as response:
+            return len(_HEALTHY_HOST.findall(response.read().decode()))
+    except (urllib.error.URLError, TimeoutError, ValueError):
         return 0
 
 
@@ -190,12 +194,33 @@ def wait_for_members(expected: int, timeout_s: float = 90.0) -> None:
     raise TimeoutError(f"the load balancer did not reach {expected} healthy instances within {timeout_s:g}s")
 ```
 
-`healthy_members()` fetches `http://localhost:47281/stats?filter=cluster.app.membership_healthy` and reads the number after the colon. `wait_for_members` polls until Envoy agrees that the expected number of instances is healthy; the zone-loss test waits for 5 before starting the load.
+`healthy_members()` fetches `http://localhost:47281/clusters`, which prints one block of lines per host, and counts the hosts whose `health_flags` line says exactly `healthy`. A host Envoy has dropped from DNS but still remembers (because it still passes its health check) shows `/pending_dynamic_removal` instead, so it is not counted. `wait_for_members` polls until Envoy agrees that the expected number of instances is healthy; the zone-loss test waits for the number of survivors before starting the load.
+
+### The ninth endpoint and the removal of dead addresses
+
+Zone c now lists a third instance, so the cluster has nine endpoints:
+
+```python
+- endpoint: {address: {socket_address: {address: app-c3, port_value: 8080}}, health_check_config: {port_value: 9101}}
+```
+
+Stopped instances are not a problem: the plan may run fewer than nine, and a stopped container's name stops resolving, so the endpoint simply has no address.
+
+The cluster also carries one setting that matters for counting:
+
+```python
+# A recreated instance gets a new address. By default Envoy keeps the old address as a member for as long as it
+# still passes its health check, so the healthy-member count (and the fleet alerts that read it) would include
+# instances that no longer exist. Drop a host as soon as DNS stops returning it.
+ignore_health_on_host_removal: true
+```
+
+When Compose recreates an instance, the container gets a new IP address. With `STRICT_DNS`, Envoy notices that DNS no longer returns the old address. By default it still keeps that host as a member for as long as the host passes its active health check, marked `/pending_dynamic_removal` in `/clusters`, and it counts it in `cluster.app.membership_healthy`. A run on this repository showed 13 and 15 members for 8 instances for that reason, which made the zone-loss test wait forever and would have made the `FleetBelowPeakCapacity` alert read a fleet that no longer exists. `ignore_health_on_host_removal: true` says: do not wait for the removed host to fail its health check, drop it as soon as DNS stops returning it.
 
 ## Try it yourself
 
-1. `make up`, then open <http://localhost:47281> to see Envoy's admin page. `/clusters` lists the eight endpoints and their health.
-2. `curl -s localhost:47281/stats?filter=cluster.app.membership_healthy` prints `cluster.app.membership_healthy: 8`.
+1. `make up`, then open <http://localhost:47281> to see Envoy's admin page. `/clusters` lists the endpoints and their health.
+2. `curl -s localhost:47281/stats?filter=cluster.app.membership_healthy` prints `cluster.app.membership_healthy: 9` right after `make up` (the count of the plan's fleet once `make run` has set it).
 3. `curl -s localhost:47280/work` prints a small JSON answer and the response headers (`curl -i`) include `x-zone` and `x-instance`; repeat a few times and the instance changes (round robin).
 4. `docker compose stop app-a1 app-a2 app-a3`, wait a few seconds, and run step 2 again: it prints `5`. Then `docker compose start app-a1 app-a2 app-a3` restores 8.
 5. `curl -s localhost:47281/stats/prometheus | grep envoy_http_downstream_rq_xx | head` shows the counters the SLO rules use.

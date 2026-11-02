@@ -113,8 +113,12 @@ class Knee:
 
 ```python
 def looks_broken(step: StepResult, baseline_p99_ms: float, rise_factor: float = RISE_FACTOR) -> bool:
-    """True when the step's p99 is more than `rise_factor` times the flat baseline, or it fails over 1% of requests."""
-    return step.p99_ms > rise_factor * baseline_p99_ms or step.error_rate > 0.01
+    """True when the step's p99 is more than `rise_factor` times the flat baseline, or it fails over 1% of requests.
+
+    The baseline counts as at least `BASELINE_FLOOR_MS`: on a shared host a 5 ms baseline is timer and scheduler noise,
+    and tripling noise is not a knee.
+    """
+    return step.p99_ms > rise_factor * max(baseline_p99_ms, BASELINE_FLOOR_MS) or step.error_rate > 0.01
 
 
 def baseline_p99(steps: list[StepResult]) -> float:
@@ -438,6 +442,9 @@ def build_parser() -> argparse.ArgumentParser:
     knee.add_argument("--steps", default=DEFAULT_STEPS, help="comma-separated requests per second")
     knee.add_argument("--step-seconds", type=float, default=10.0, help="the lesson uses 120 for the real thing")
     knee.add_argument("--margin", type=float, default=0.25, help="how far below the knee to set the safe load")
+    knee.add_argument(
+        "--attempts", type=int, default=3, help="repeat the whole test this often until it is trustworthy"
+    )
     for name, helptext in (
         ("soak", "hold one instance at the safe load"),
         ("fleet", "load the fleet through the load balancer"),
@@ -449,6 +456,10 @@ def build_parser() -> argparse.ArgumentParser:
         run.add_argument("--label", default=name)
         run.add_argument("--slo-p99-ms", type=float, default=50.0)
         run.add_argument("--window", type=float, default=10.0, help="seconds per p99 window")
+        run.add_argument("--ops", default="", help="the instance's ops port, to tell a saturated core from a busy host")
+        run.add_argument(
+            "--attempts", type=int, default=3, help="run again this often when a window spiked with no errors"
+        )
     return parser
 
 
@@ -456,7 +467,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     """Entry point of `capacity-loadtest`."""
     configure_logging("WARNING")
     args = build_parser().parse_args(argv)
-    result = asyncio.run(_knee(args) if args.command == "knee" else _timed(args))
+    result, problem = asyncio.run(_knee(args) if args.command == "knee" else _timed(args))
+    if problem is not None:
+        sys.exit(f"not a valid measurement, nothing written: {problem}. Run again when the machine is quiet.")
 ```
 
 `argparse` builds the command line. `add_subparsers` creates `knee`, `soak` and `fleet`. `type=float` converts the text; `required=True` makes an option mandatory; `default=` supplies a value; `help=` is the text shown by `--help`.

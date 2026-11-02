@@ -124,11 +124,11 @@ The route sends every path to the cluster `app`, with `timeout: 2s` and one retr
 
 ```python
 def healthy_members() -> int:
-    """Healthy instances according to the load balancer, or 0 when it cannot be reached."""
+    """Hosts the load balancer lists as healthy and not pending removal, or 0 when it cannot be reached."""
     try:
-        with urllib.request.urlopen(HEALTHY_MEMBERS_URL, timeout=3) as response:
-            return int(response.read().decode().strip().rsplit(":", 1)[1])
-    except (urllib.error.URLError, TimeoutError, ValueError, IndexError):
+        with urllib.request.urlopen(CLUSTERS_URL, timeout=3) as response:
+            return len(_HEALTHY_HOST.findall(response.read().decode()))
+    except (urllib.error.URLError, TimeoutError, ValueError):
         return 0
 
 
@@ -151,14 +151,14 @@ def versions_seen(url: str, samples: int) -> set[str]:
     return seen
 ```
 
-`urllib.request.urlopen(HEALTHY_MEMBERS_URL, timeout=3)` fetches `http://localhost:47281/stats?filter=cluster.app.membership_healthy`, a page that prints `cluster.app.membership_healthy: 8`. The code takes the text after the last colon: `rsplit(":", 1)[1]`. `versions_seen` sends `samples` requests and collects the `X-Version` header of each: the rollout test uses it to confirm which release is serving.
+`urllib.request.urlopen(CLUSTERS_URL, timeout=3)` fetches `http://localhost:47281/clusters`, a page that prints one line per host and per statistic. The code counts the lines that match the regular expression `^app::\S+::health_flags::healthy$`. `versions_seen` sends `samples` requests and collects the `X-Version` header of each: the rollout test uses it to confirm which release is serving.
 
 ## Try it yourself
 
 1. `printf 'GET /work HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' | nc localhost 47280` sends a hand-written request to Envoy (if you have `nc`); you see the status line, the headers (including `content-length`) and the JSON body.
 2. `curl -i localhost:47280/work` prints the same through curl.
 3. `curl -s -o /dev/null -w '%{http_code} %{time_total}\n' localhost:47280/work` prints the status code and the time in seconds (about a millisecond or two of CPU plus a few milliseconds of network).
-4. `curl -s localhost:47281/stats?filter=cluster.app.membership_healthy` prints `cluster.app.membership_healthy: 8`.
+4. `curl -s localhost:47281/clusters | grep -c 'health_flags::healthy$'` prints `9` right after `make up`.
 5. `.venv/bin/python -m pytest tests/integration/test_instance_and_loadgen.py -q` exercises the hand-written client against a real instance.
 
 ## Mistakes people make

@@ -27,7 +27,7 @@ $(STAMP): requirements-dev.lock pyproject.toml
 
 install: $(STAMP) ## create .venv from the lock file
 
-up: $(STAMP) ## build and start the fleet: 8 instances in 3 zones, Envoy, the ledger, PostgreSQL, Prometheus
+up: $(STAMP) ## build and start the fleet: 9 instances in 3 zones (the plan says how many run), Envoy, the ledger, PostgreSQL, Prometheus
 	docker compose up -d --build --wait
 	@echo "edge http://localhost:$${EDGE_PORT:-47280}/work   Envoy admin http://localhost:$${ENVOY_ADMIN_PORT:-47281}   Prometheus http://localhost:$${PROMETHEUS_PORT:-47290}"
 
@@ -64,10 +64,10 @@ soak: $(STAMP) ## hold one instance at the safe load for SOAK_SECONDS and check 
 plan: $(STAMP) ## size the fleet from the measured safe load: the formula, the inputs, the result
 	$(VENV)/bin/capacity plan
 
-full-fleet: $(STAMP) ## run the projected peak (2,000 rps) on all 8 instances, no shared dependency yet
+full-fleet: $(STAMP) ## run the projected peak (2,000 rps) on the planned fleet, no shared dependency yet
 	$(EXPERIMENTS) full-fleet --seconds $(CHECK_SECONDS)
 
-zone-loss: $(STAMP) ## stop the largest zone and run the projected peak on the 5 survivors
+zone-loss: $(STAMP) ## stop the largest zone and run the projected peak on the survivors
 	$(EXPERIMENTS) zone-loss --seconds $(CHECK_SECONDS)
 
 pool-sweep: $(STAMP) ## reintroduce the shared ledger and step its connection pool up until the SLO holds
