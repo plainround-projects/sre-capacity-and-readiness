@@ -325,6 +325,45 @@ class Compose:
 
 `Compose.run` calls `subprocess.run(["docker", "compose", *args], ...)` and retries a few times when Docker's daemon answers with a transient error ("Bad Gateway", a reset connection), which happens when the machine is overloaded; any other failure raises `ComposeError` at once. `recreate`, `stop`, `start`, `pause`, `unpause`, `db` and `loadtest` are named wrappers for the Compose commands the experiments need. `start_loadtest` uses `subprocess.Popen` to run the generator in the background while the experiment rolls instances.
 
+### The remaining instances: zones b and c
+
+Zone A's instances `app-a2` and `app-a3` are written exactly like `app-a1` without the published host ports. The other five instances repeat the same pattern:
+
+```yaml
+app-b1:
+  <<: *instance
+  environment:
+    <<: *instance-env
+    ZONE: b
+    INSTANCE: b1
+app-b2:
+  <<: *instance
+  environment:
+    <<: *instance-env
+    ZONE: b
+    INSTANCE: b2
+app-b3:
+  <<: *instance
+  environment:
+    <<: *instance-env
+    ZONE: b
+    INSTANCE: b3
+app-c1:
+  <<: *instance
+  environment:
+    <<: *instance-env
+    ZONE: c
+    INSTANCE: c1
+app-c2:
+  <<: *instance
+  environment:
+    <<: *instance-env
+    ZONE: c
+    INSTANCE: c2
+```
+
+`<<: *instance` copies the shared service definition (the anchor `instance`) and `<<: *instance-env` copies the shared environment, then the two lines `ZONE` and `INSTANCE` say which zone and which instance this container is. That makes eight instances in all: three in zone a, three in zone b and two in zone c, the 3/3/2 spread the plan computes. Losing zone a removes three, leaving the five that carry the projected peak.
+
 ## Try it yourself
 
 1. `docker compose config --services` lists the services (the `loadtest` one only with `--profile tools`).

@@ -8,6 +8,12 @@ This folder teaches every technology used in `sre-capacity-and-readiness`, from 
 | --- | --- |
 | [python.md](python.md) | The language: dataclasses, enums, the CPU work, the knee search, the plan formula, `subprocess`, `argparse`. |
 | [asyncio.md](asyncio.md) | The open-loop load generator, the instance that does CPU work on the event loop, and the async ledger. |
+| [python-domain-layer.md](python-domain-layer.md) | Every file of `domain/`: CPU work, latency, knee, plan, readiness, telemetry, SLO formulas. |
+| [python-application-layer.md](python-application-layer.md) | Every file of `application/`: ports, load tests, SLI counting, alert replay, rule generation, the report and the review. |
+| [python-infrastructure-layer.md](python-infrastructure-layer.md) | Every file of `infrastructure/`: settings, logging, metrics, the open-loop generator, Docker Compose, files. |
+| [python-interfaces-layer.md](python-interfaces-layer.md) | Every file of `interfaces/`: the instance, the ledger and the command-line programs. |
+| [python-tests.md](python-tests.md) | Every test file, with what each test proves. |
+| [promql-generated-rules.md](promql-generated-rules.md) | Every line of the two generated rule files, group by group. |
 | [aiohttp.md](aiohttp.md) | The instance and the ledger as web services, and the instance's bounded call to the ledger. |
 | [http.md](http.md) | HTTP/1.1 byte by byte: the hand-written client, keep-alive, status codes, `curl`. |
 | [json.md](json.md) | The evidence files, the report documents and JSON over HTTP. |
@@ -41,13 +47,13 @@ This folder teaches every technology used in `sre-capacity-and-readiness`, from 
 
 ## Suggested reading order
 
-1. Language and concurrency: `python.md`, `asyncio.md`.
+1. Language and concurrency: `python.md`, `asyncio.md`, then the code itself layer by layer: `python-domain-layer.md`, `python-application-layer.md`, `python-infrastructure-layer.md`, `python-interfaces-layer.md`.
 2. Web pieces: `http.md`, `aiohttp.md`, `json.md`, `python-logging.md`, `regex.md`.
 3. Data: `sql.md`, `postgresql.md`, `psycopg.md`, `bash.md`.
 4. The fleet and its edge: `docker.md`, `docker-compose.md`, `envoy.md`.
-5. Measuring and alerting: `prometheus-client.md`, `prometheus.md`, `promql-and-alert-rules.md`, `promtool.md`, `grafana-dashboard.md`, `yaml.md`, `pyyaml.md`.
+5. Measuring and alerting: `prometheus-client.md`, `prometheus.md`, `promql-and-alert-rules.md`, `promql-generated-rules.md`, `promtool.md`, `grafana-dashboard.md`, `yaml.md`, `pyyaml.md`.
 6. Build and documents: `make.md`, `pyproject-toml.md`, `pip-and-lock-files.md`, `markdown.md`.
-7. Checks: `pytest.md`, `ruff.md`, `mypy.md`, `import-linter.md`, `github-actions.md`.
+7. Checks: `pytest.md`, `python-tests.md`, `ruff.md`, `mypy.md`, `import-linter.md`, `github-actions.md`.
 8. Housekeeping: `git.md`, `editorconfig.md`.
 
 ## If you have ten minutes
