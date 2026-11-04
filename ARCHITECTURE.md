@@ -10,7 +10,7 @@ This document describes what the code in this repository does and why it is shap
 | **One instance** | [`interfaces/instance_app.py`](src/capacity/interfaces/instance_app.py), [`domain/cpu.py`](src/capacity/domain/cpu.py) | `GET /work`: real CPU work (a chain of SHA-256) on the event loop, then an optional call to the ledger. A container pinned to a vCPU of its own (`cpuset`) with 256 MiB. Its capacity is one over the cost of a request. |
 | **Measurements** | [`application/loadtest.py`](src/capacity/application/loadtest.py), [`domain/latency.py`](src/capacity/domain/latency.py), `docs/evidence/*.json` | The stepped knee test (throughput, p50, p99, errors and the instance's CPU at each step), timed runs with per-window p99, and the JSON each experiment leaves behind. |
 | **Capacity plan** | [`domain/knee.py`](src/capacity/domain/knee.py), [`domain/plan.py`](src/capacity/domain/plan.py), [`application/capacity_report.py`](src/capacity/application/capacity_report.py) | Finding the knee, choosing a load a margin below it, and the fleet formula with a lost-zone check; rendered to `docs/capacity-plan.md` from the evidence. |
-| **Edge (Envoy)** | [`deploy/envoy.yaml`](deploy/envoy.yaml) | Round-robin over eight instances in three localities with active health checks, one retry on a refused connection, and the request counts and latency histogram the SLIs read. |
+| **Edge (Envoy)** | [`deploy/envoy.yaml`](deploy/envoy.yaml) | Round-robin over the nine instances the compose file defines (a1..a3, b1..b3, c1..c3) in three localities; the plan says how many run with active health checks, one retry on a refused connection, and the request counts and latency histogram the SLIs read. |
 | **The shared ledger** | [`interfaces/ledger_app.py`](src/capacity/interfaces/ledger_app.py), [`sql/`](sql) | A bounded pool of PostgreSQL connections that every instance's request borrows for a configurable time. The next bottleneck. |
 | **Readiness review** | [`application/readiness.py`](src/capacity/application/readiness.py), [`domain/readiness.py`](src/capacity/domain/readiness.py), `readiness/checklist.yaml` | A checklist where every item runs a check against the repository or the evidence and gets PASS, FAIL or ACCEPTED RISK with an owner; a FAIL has a date, an accepted risk the condition that reopens it. |
 | **Launch decision** | [`application/launch_decision.py`](src/capacity/application/launch_decision.py), `docs/launch-decision.md` | One of LAUNCH, LAUNCH WITH CONDITIONS, DON'T LAUNCH YET, with every condition's owner and date on the same line. |
@@ -38,7 +38,7 @@ flowchart LR
     gen -. "knee and soak:<br/>one instance directly" .-> a1
     envoy --> a1["Instance a1..a3<br/>zone a"]
     envoy --> b1["Instance b1..b3<br/>zone b"]
-    envoy --> c1["Instance c1..c2<br/>zone c"]
+    envoy --> c1["Instance c1..c3<br/>zone c"]
     a1 & b1 & c1 -- "POST /entries<br/>(when linked)" --> ledger["Ledger<br/>pool of N connections"]
     ledger --> db[("PostgreSQL")]
     envoy & a1 & b1 & c1 & ledger -- "metrics" --> prom["Prometheus<br/>SLO rules, fleet alert"]
@@ -55,10 +55,10 @@ flowchart LR
 1. `make knee`: the generator steps one instance (no ledger yet) through 100, 200, ... requests a second for 10 seconds each. Before and after every step it reads the instance's `process_cpu_seconds_total`, so each step has a CPU utilization. `find_knee` takes the median p99 of the first three steps as the flat baseline and calls the first step more than three times that, or failing more than 1% of requests, the knee. The test stops two steps past it. The resource is named only if the instance was using at least 90% of its core there.
 2. `make soak` holds the instance at `safe_load(knee)` (a quarter below the knee, rounded down to 25) and reports p99 in 10-second windows, so a slow drift cannot hide in an average.
 3. `make plan` applies the formula to the measured safe load: `instances_for_peak = ceil(2,000 / safe)`, then the smallest total over three zones whose *largest zone* can be lost and still leave that many. The plan is saved as evidence.
-4. `make full-fleet` and `make zone-loss` run 2,000 requests a second through Envoy against all eight instances and then against the five that remain after `docker compose stop` of zone a, after waiting until Envoy's health checks agree there are five.
+4. `make full-fleet` and `make zone-loss` run 2,000 requests a second through Envoy against all the instances the plan names (eight in the run recorded in the README) and then against those that remain after `docker compose stop` of zone a (five for that plan), after waiting until Envoy's health checks agree on that number.
 5. `make pool-sweep` links every instance to the ledger, then runs the projected peak against ledger pools of the naive size (peak times hold time) and upward. The smallest size that holds, plus 25%, is adopted and confirmed.
 6. `make dependency-test` pauses the ledger (it accepts connections and never answers) and sends traffic to one instance: every request must fail within the ledger timeout plus 250 ms, and the instance's health endpoint must stay green.
-7. `make rollout-test` recreates the instances one at a time to v2 and back to v1 while 1,000 requests a second flow through Envoy, waiting for eight healthy members after each, and checks that the version answering is the intended one at the end of each roll.
+7. `make rollout-test` recreates the instances one at a time to v2 and back to v1 while 1,000 requests a second flow through Envoy, waiting for every planned member (eight in the README's run) to be healthy after each, and checks that the version answering is the intended one at the end of each roll.
 8. `make restore-test` dumps the ledger, restores the dump into a scratch database and compares row count and an order-independent checksum with the source, timing the restore against the target.
 9. `make plan-doc` and `make review` render the capacity plan and run the checklist against everything above; the decision lands in `docs/launch-decision.md`.
 
@@ -71,7 +71,7 @@ The decision records are in [docs/adr](docs/adr):
 - [0003](docs/adr/0003-one-core-per-instance-and-cpu-work-on-the-event-loop.md): one core per instance, real CPU work on the event loop.
 - [0004](docs/adr/0004-the-shared-dependency-is-a-real-pool.md): the shared dependency is a real connection pool in front of PostgreSQL.
 
-**Evidence is data, and tests read it.** Each experiment writes JSON under `docs/evidence/`; the plan, the runbooks, the alert threshold and the launch decision are checked against it by `tests/unit/test_evidence.py`. A plan that says "five instances" while the evidence says six fails the build. The cost is that evidence is committed measurement from one machine; the README says so.
+**Evidence is data, and tests read it.** Each experiment writes JSON under `docs/evidence/`; the plan, the runbooks, the alert threshold and the launch decision are checked against it by `tests/unit/test_evidence.py`. A plan that says "five instances" while the evidence says six fails the build. The cost is that evidence is committed measurement from one machine; the README says so. So far only `restore.json` and `dependency.json` are committed; the knee, soak, plan and pool-sweep results are "not yet measured" in the README, and the numbers in this document that depend on them (for example eight instances, five survivors) come from separate, uncommitted runs.
 
 **The review can fail.** A check that cannot find its evidence fails (`restore not yet tested`), and no check passes on a file merely existing when the lesson asks for a measurement. Verdicts that are not PASS must name an owner (a role) and a date or a reopening condition, or the item cannot be constructed (`InvalidReviewError`).
 
@@ -90,7 +90,7 @@ The decision records are in [docs/adr](docs/adr):
 | A short validation that hides drift | `domain/latency.py::window_p99s`, `make soak` reports every window |
 | Headroom from today's peak | `tests/unit/test_knee_and_plan.py::test_headroom_comes_from_the_projected_peak_not_todays` |
 | A plan never checked against a load test | `make zone-loss` and `test_step_three_the_planned_fleet_minus_a_zone_was_run_at_the_projected_peak_and_held` |
-| A pool sized to the naive average | `make pool-sweep`: the pool of 20 fails the SLO at the projected peak |
+| A pool sized to the naive average | `make pool-sweep`: the pool of 20 is expected to fail the SLO at the projected peak (not yet measured here) |
 | Passing "restore" without ever restoring | `Reviewer._restore_check`: no evidence is a FAIL; `make restore-test` actually restores and compares |
 | A review that cannot fail | `tests/unit/test_readiness.py`: eleven ways to make an item fail |
 

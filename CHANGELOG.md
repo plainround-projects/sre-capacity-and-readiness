@@ -8,6 +8,10 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 - Drawn architecture and flow figures in `docs/diagrams/`, light and dark, shown in the README.
 
+### Fixed
+
+- ARCHITECTURE.md and README now match the code where they disagreed (see the drawn figures).
+
 ## [0.1.0] - 2026-10-27
 
 ### Added

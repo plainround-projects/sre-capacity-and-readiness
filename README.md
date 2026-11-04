@@ -45,7 +45,7 @@ The experiments need CPU that is really free: the full fleet at the projected pe
 ## Setup, run, test, stop
 
 ```bash
-make up              # builds and starts 8 instances in 3 zones, Envoy, the ledger, PostgreSQL and Prometheus
+make up              # builds and starts 9 instances in 3 zones (the plan says how many run), Envoy, the ledger, PostgreSQL and Prometheus
 make run             # the whole exercise in the lesson's order (about 15 minutes), ending in the launch decision
 make knee            # step the load up on one instance until p99 climbs; names the saturated resource
 make soak            # hold one instance at the safe load for SOAK_SECONDS (default 120; the lesson's real run is 1800)
@@ -163,7 +163,7 @@ sql/                 000_roles.sh (least-privilege role), 001_schema.sql, 002_se
 tech/                one beginner-level note per technology used here (start at tech/README.md).
 docs/                the capacity plan and launch decision (both generated), evidence, runbooks, ownership,
                      decision records.
-docker-compose.yml   8 instances in 3 zones, Envoy, ledger, PostgreSQL, Prometheus, the load generator.
+docker-compose.yml   9 instances in 3 zones (the plan says how many run), Envoy, ledger, PostgreSQL, Prometheus, the load generator.
 Dockerfile           one image for every process.      Makefile  the only commands a reader needs (make help).
 pyproject.toml       project metadata and every tool's configuration (ruff, mypy, pytest, import-linter).
 requirements*.lock   hash-pinned dependencies (runtime, and runtime plus development tools).
