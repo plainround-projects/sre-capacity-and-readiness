@@ -2,6 +2,12 @@
 
 All notable changes to this project are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Drawn architecture and flow figures in `docs/diagrams/`, light and dark, shown in the README.
+
 ## [0.1.0] - 2026-10-27
 
 ### Added

@@ -1,0 +1,154 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="780" viewBox="0 0 1200 780" role="img" aria-labelledby="t d">
+<title id="t">Capacity and readiness: architecture</title>
+<desc id="d">An open-loop load generator sends traffic through Envoy to instances in zones a, b and c, or straight to one instance for the knee and soak tests. The instances call a shared ledger with a bounded connection pool in front of PostgreSQL, shown in amber because a pool of 20 misses the SLO at peak. Prometheus scrapes the fleet and the ledger. The generator writes measurements, from which the capacity plan and the readiness review are produced and the review ends in one launch decision.</desc>
+<style>
+:root{--paper:#0d1117;--ink:#f5f4f8;--mute:#9a96ab;--accent:#6ec8ff;--good:#7ce0a1;--warn:#ffd166}
+text{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;fill:var(--ink)}
+.title{font-family:Georgia,'Iowan Old Style','Times New Roman',serif;font-size:36px}
+.caption{font-size:16px;fill:var(--mute)}
+.name{font-size:20px;font-weight:600}
+.lane{font-size:17px;font-weight:600}
+.sub{font-size:15px;fill:var(--mute)}
+.label{font-size:15px}
+.tag{font-size:15px;fill:var(--mute)}
+.num{font-size:15px;font-weight:700;fill:var(--paper)}
+.legend{font-size:14px;fill:var(--mute)}
+.t-accent{fill:var(--accent)}
+.t-good{fill:var(--good)}
+.t-warn{fill:var(--warn)}
+.t-ink{fill:var(--ink)}
+.b{font-weight:600}
+.paper{fill:var(--paper);stroke:var(--mute);stroke-opacity:.3}
+.grid{fill:url(#grid)}
+.boundary{fill:var(--mute);fill-opacity:.035;stroke:var(--mute);stroke-opacity:.7;stroke-dasharray:6 5}
+.svc{fill:var(--accent);fill-opacity:.08;stroke:var(--accent);stroke-width:1.25}
+.store{fill:var(--mute);fill-opacity:.1;stroke:var(--mute);stroke-width:1.25}
+.rim{fill:none;stroke:var(--mute);stroke-width:1.25}
+.actor{fill:none;stroke:var(--mute);stroke-width:1.25}
+.slot{fill:var(--accent);fill-opacity:.14;stroke:var(--accent);stroke-width:1}
+.note{fill:var(--warn);fill-opacity:.09;stroke:var(--warn);stroke-width:1}
+.win{fill:var(--good);fill-opacity:.09;stroke:var(--good);stroke-width:1}
+.hair{fill:none;stroke:var(--mute);stroke-opacity:.4;stroke-width:1}
+.zone{fill:var(--accent);fill-opacity:.045;stroke:var(--accent);stroke-width:1.25;stroke-dasharray:6 5}
+.stop{fill:none;stroke:var(--warn);stroke-width:4;stroke-linecap:round}
+.mask{fill:var(--paper)}
+.sync,.async,.read,.fail,.ok{fill:none}
+.sync{stroke:var(--accent);stroke-width:1.75;marker-end:url(#a-sync)}
+.async{stroke:var(--accent);stroke-width:1.75;stroke-dasharray:8 6;marker-end:url(#a-async)}
+.read{stroke:var(--mute);stroke-width:1.75;stroke-linecap:round;stroke-dasharray:1 6;marker-end:url(#a-read)}
+.fail{stroke:var(--warn);stroke-width:2;marker-end:url(#a-fail)}
+.ok{stroke:var(--good);stroke-width:1.75;marker-end:url(#a-ok)}
+.dot{fill:var(--accent)}
+.dot-w{fill:var(--warn)}
+.dot-g{fill:var(--good)}
+.head-sync,.head-async{stroke:var(--accent)}
+.head-sync{fill:var(--accent)}
+.head-async,.head-read{fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.head-read{stroke:var(--mute)}
+.head-fail{fill:var(--warn)}
+.head-ok{fill:var(--good)}
+.gridline{fill:none;stroke:var(--mute);stroke-opacity:.09}
+</style>
+<defs>
+<pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path class="gridline" d="M40 0H0V40"/></pattern>
+<marker id="a-sync" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="head-sync" d="M0 0L10 5L0 10z"/></marker>
+<marker id="a-async" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="head-async" d="M1 1L9 5L1 9"/></marker>
+<marker id="a-read" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="head-read" d="M1 1L9 5L1 9"/></marker>
+<marker id="a-fail" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="head-fail" d="M0 0L10 5L0 10z"/></marker>
+<marker id="a-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="head-ok" d="M0 0L10 5L0 10z"/></marker>
+</defs>
+<rect class="paper" x="0.5" y="0.5" width="1199" height="779" rx="16"/>
+<rect class="grid" x="1" y="1" width="1198" height="778" rx="16"/>
+<text class="title" x="48" y="68">From a load-test knee to a launch decision</text>
+<text class="caption" x="48" y="100">The rig measures, the plan sizes the fleet, the review decides. Amber: the shared pool is the next bottleneck.</text>
+<rect class="svc" x="48" y="232" width="190" height="108" rx="12"/>
+<text class="name" x="64" y="264">Load generator</text>
+<text class="sub" x="64" y="288">openloop.py</text>
+<text class="sub" x="64" y="310">open loop,</text>
+<text class="sub" x="64" y="332">100 to 2,000 rps</text>
+<rect class="svc" x="310" y="232" width="170" height="108" rx="12"/>
+<text class="name" x="326" y="264">Edge (Envoy)</text>
+<text class="sub" x="326" y="288">round-robin,</text>
+<text class="sub" x="326" y="310">health checks,</text>
+<text class="sub" x="326" y="332">one retry</text>
+<rect class="boundary" x="580" y="132" width="230" height="402" rx="14"/>
+<text class="tag" x="596" y="160">Instances, one core each</text>
+<rect class="svc" x="596" y="172" width="198" height="96" rx="12"/>
+<text class="name" x="612" y="204">Zone a</text>
+<rect class="slot" x="612" y="220" width="50" height="32" rx="6"/>
+<text class="label t-accent" x="637" y="241" text-anchor="middle">a1</text>
+<rect class="slot" x="670" y="220" width="50" height="32" rx="6"/>
+<text class="label t-accent" x="695" y="241" text-anchor="middle">a2</text>
+<rect class="slot" x="728" y="220" width="50" height="32" rx="6"/>
+<text class="label t-accent" x="753" y="241" text-anchor="middle">a3</text>
+<rect class="svc" x="596" y="288" width="198" height="96" rx="12"/>
+<text class="name" x="612" y="320">Zone b</text>
+<rect class="slot" x="612" y="336" width="50" height="32" rx="6"/>
+<text class="label t-accent" x="637" y="357" text-anchor="middle">b1</text>
+<rect class="slot" x="670" y="336" width="50" height="32" rx="6"/>
+<text class="label t-accent" x="695" y="357" text-anchor="middle">b2</text>
+<rect class="slot" x="728" y="336" width="50" height="32" rx="6"/>
+<text class="label t-accent" x="753" y="357" text-anchor="middle">b3</text>
+<rect class="svc" x="596" y="404" width="198" height="96" rx="12"/>
+<text class="name" x="612" y="436">Zone c</text>
+<rect class="slot" x="612" y="452" width="50" height="32" rx="6"/>
+<text class="label t-accent" x="637" y="473" text-anchor="middle">c1</text>
+<rect class="slot" x="670" y="452" width="50" height="32" rx="6"/>
+<text class="label t-accent" x="695" y="473" text-anchor="middle">c2</text>
+<rect class="slot" x="728" y="452" width="50" height="32" rx="6"/>
+<text class="label t-accent" x="753" y="473" text-anchor="middle">c3</text>
+<rect class="svc" x="940" y="262" width="212" height="108" rx="12"/>
+<text class="name" x="956" y="294">Ledger</text>
+<text class="sub" x="956" y="318">pool of 20,</text>
+<text class="sub" x="956" y="340">2 workers</text>
+<path class="store" d="M940 452a106 12 0 0 1 212 0v76a106 12 0 0 1 -212 0z"/>
+<path class="rim" d="M940 452a106 12 0 0 0 212 0"/>
+<text class="name" x="1046" y="480" text-anchor="middle">PostgreSQL</text>
+<text class="sub" x="1046" y="502" text-anchor="middle">ledger database</text>
+<rect class="svc" x="940" y="140" width="212" height="84" rx="12"/>
+<text class="name" x="956" y="172">Prometheus</text>
+<text class="sub" x="956" y="196">SLO rules, alerts</text>
+<rect class="note" x="300" y="372" width="270" height="72" rx="10"/>
+<text class="label b t-warn" x="316" y="400">Pool of 20 fails the SLO</text>
+<text class="sub" x="316" y="424">at the 2,000 rps peak</text>
+<path class="store" d="M48 612a115 12 0 0 1 230 0v76a115 12 0 0 1 -230 0z"/>
+<path class="rim" d="M48 612a115 12 0 0 0 230 0"/>
+<text class="name" x="163" y="640" text-anchor="middle">Measurements</text>
+<text class="sub" x="163" y="662" text-anchor="middle">docs/evidence/*.json</text>
+<rect class="svc" x="358" y="588" width="200" height="92" rx="12"/>
+<text class="name" x="374" y="620">Capacity plan</text>
+<text class="sub" x="374" y="644">knee, safe load,</text>
+<text class="sub" x="374" y="666">fleet formula</text>
+<rect class="svc" x="638" y="588" width="216" height="92" rx="12"/>
+<text class="name" x="654" y="620">Readiness review</text>
+<text class="sub" x="654" y="644">PASS, FAIL,</text>
+<text class="sub" x="654" y="666">ACCEPTED RISK</text>
+<rect class="svc" x="934" y="588" width="200" height="92" rx="12"/>
+<text class="name" x="950" y="620">Launch decision</text>
+<text class="sub" x="950" y="644">one page,</text>
+<text class="sub" x="950" y="666">owner and date</text>
+<path class="sync" d="M238 286H310"/>
+<text class="label t-accent" x="244" y="274">traffic</text>
+<path class="sync" d="M480 286H580"/>
+<text class="label t-accent" x="488" y="274">GET /work</text>
+<path class="sync" d="M214 340V490H580"/>
+<text class="label t-accent" x="226" y="478">knee, soak: one instance</text>
+<path class="sync" d="M163 340V600"/>
+<text class="label t-accent" x="70" y="470">evidence</text>
+<path class="fail" d="M810 316H940"/>
+<text class="label t-warn" x="822" y="304">POST /entries</text>
+<path class="sync" d="M1046 370V440"/>
+<text class="label t-accent" x="1058" y="410">SQL</text>
+<path class="read" d="M810 160H940"/>
+<text class="label " x="830" y="148">metrics</text>
+<path class="read" d="M1046 262V224"/>
+<text class="label " x="1058" y="248">metrics</text>
+<path class="sync" d="M278 634H358"/>
+<text class="label t-accent" x="286" y="622">evidence</text>
+<path class="sync" d="M558 634H638"/>
+<text class="label t-accent" x="574" y="622">plan</text>
+<path class="sync" d="M854 634H934"/>
+<path class="sync" d="M48 736H112"/><text class="legend" x="124" y="741">sync call</text>
+<path class="read" d="M520 736H584"/><text class="legend" x="596" y="741">read</text>
+<path class="fail" d="M696 736H760"/><text class="legend" x="772" y="741">failure path</text>
+</svg>

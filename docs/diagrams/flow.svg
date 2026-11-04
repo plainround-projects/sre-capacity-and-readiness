@@ -1,0 +1,134 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="880" viewBox="0 0 1200 880" role="img" aria-labelledby="t d">
+<title id="t">Capacity and readiness: one run</title>
+<desc id="d">One make run in nine steps. The generator finds the knee and soaks one instance, the plan sizes the fleet, the fleet runs at 2,000 rps with a zone stopped, the pool sweep shows the next bottleneck, then the dependency freeze, the rolling restart and the restore test run, and the review ends in one launch decision.</desc>
+<style>
+:root{--paper:#ffffff;--ink:#10243d;--mute:#52677f;--accent:#0a6aa8;--good:#19743f;--warn:#8a5a00}
+text{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;fill:var(--ink)}
+.title{font-family:Georgia,'Iowan Old Style','Times New Roman',serif;font-size:36px}
+.caption{font-size:16px;fill:var(--mute)}
+.name{font-size:20px;font-weight:600}
+.lane{font-size:17px;font-weight:600}
+.sub{font-size:15px;fill:var(--mute)}
+.label{font-size:15px}
+.tag{font-size:15px;fill:var(--mute)}
+.num{font-size:15px;font-weight:700;fill:var(--paper)}
+.legend{font-size:14px;fill:var(--mute)}
+.t-accent{fill:var(--accent)}
+.t-good{fill:var(--good)}
+.t-warn{fill:var(--warn)}
+.t-ink{fill:var(--ink)}
+.b{font-weight:600}
+.paper{fill:var(--paper);stroke:var(--mute);stroke-opacity:.3}
+.grid{fill:url(#grid)}
+.boundary{fill:var(--mute);fill-opacity:.035;stroke:var(--mute);stroke-opacity:.7;stroke-dasharray:6 5}
+.svc{fill:var(--accent);fill-opacity:.08;stroke:var(--accent);stroke-width:1.25}
+.store{fill:var(--mute);fill-opacity:.1;stroke:var(--mute);stroke-width:1.25}
+.rim{fill:none;stroke:var(--mute);stroke-width:1.25}
+.actor{fill:none;stroke:var(--mute);stroke-width:1.25}
+.slot{fill:var(--accent);fill-opacity:.14;stroke:var(--accent);stroke-width:1}
+.note{fill:var(--warn);fill-opacity:.09;stroke:var(--warn);stroke-width:1}
+.win{fill:var(--good);fill-opacity:.09;stroke:var(--good);stroke-width:1}
+.hair{fill:none;stroke:var(--mute);stroke-opacity:.4;stroke-width:1}
+.zone{fill:var(--accent);fill-opacity:.045;stroke:var(--accent);stroke-width:1.25;stroke-dasharray:6 5}
+.stop{fill:none;stroke:var(--warn);stroke-width:4;stroke-linecap:round}
+.mask{fill:var(--paper)}
+.sync,.async,.read,.fail,.ok{fill:none}
+.sync{stroke:var(--accent);stroke-width:1.75;marker-end:url(#a-sync)}
+.async{stroke:var(--accent);stroke-width:1.75;stroke-dasharray:8 6;marker-end:url(#a-async)}
+.read{stroke:var(--mute);stroke-width:1.75;stroke-linecap:round;stroke-dasharray:1 6;marker-end:url(#a-read)}
+.fail{stroke:var(--warn);stroke-width:2;marker-end:url(#a-fail)}
+.ok{stroke:var(--good);stroke-width:1.75;marker-end:url(#a-ok)}
+.dot{fill:var(--accent)}
+.dot-w{fill:var(--warn)}
+.dot-g{fill:var(--good)}
+.head-sync,.head-async{stroke:var(--accent)}
+.head-sync{fill:var(--accent)}
+.head-async,.head-read{fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.head-read{stroke:var(--mute)}
+.head-fail{fill:var(--warn)}
+.head-ok{fill:var(--good)}
+.gridline{fill:none;stroke:var(--mute);stroke-opacity:.09}
+</style>
+<defs>
+<pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path class="gridline" d="M40 0H0V40"/></pattern>
+<marker id="a-sync" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="head-sync" d="M0 0L10 5L0 10z"/></marker>
+<marker id="a-async" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="head-async" d="M1 1L9 5L1 9"/></marker>
+<marker id="a-read" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="head-read" d="M1 1L9 5L1 9"/></marker>
+<marker id="a-fail" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="head-fail" d="M0 0L10 5L0 10z"/></marker>
+<marker id="a-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path class="head-ok" d="M0 0L10 5L0 10z"/></marker>
+</defs>
+<rect class="paper" x="0.5" y="0.5" width="1199" height="879" rx="16"/>
+<rect class="grid" x="1" y="1" width="1198" height="878" rx="16"/>
+<text class="title" x="48" y="68">One run: knee, plan, drills, decision</text>
+<text class="caption" x="48" y="100">make run: the amber row is the shared pool of 20 missing the SLO at the projected peak.</text>
+<rect class="svc" x="400" y="128" width="140" height="48" rx="10"/>
+<text class="lane" x="470" y="148" text-anchor="middle">Load</text>
+<text class="lane" x="470" y="168" text-anchor="middle">generator</text>
+<rect class="svc" x="555" y="128" width="130" height="48" rx="10"/>
+<text class="lane" x="620" y="148" text-anchor="middle">Edge and</text>
+<text class="lane" x="620" y="168" text-anchor="middle">instances</text>
+<rect class="svc" x="705" y="128" width="130" height="48" rx="10"/>
+<text class="lane" x="770" y="148" text-anchor="middle">Ledger,</text>
+<text class="lane" x="770" y="168" text-anchor="middle">PostgreSQL</text>
+<rect class="svc" x="860" y="128" width="150" height="48" rx="10"/>
+<text class="lane" x="935" y="158" text-anchor="middle">Measurements</text>
+<rect class="svc" x="1026" y="128" width="120" height="48" rx="10"/>
+<text class="lane" x="1086" y="148" text-anchor="middle">Plan and</text>
+<text class="lane" x="1086" y="168" text-anchor="middle">review</text>
+<path class="hair" d="M470 176V812M620 176V812M770 176V812M935 176V812M1086 176V812"/>
+<path class="hair" d="M66 216V792"/>
+<circle class="dot" cx="66" cy="216" r="15"/><text class="num" x="66" y="221" text-anchor="middle">1</text>
+<text class="label b t-ink" x="96" y="212">The knee, one instance</text>
+<text class="sub" x="96" y="232">10 s steps, stops 2 past the knee</text>
+<circle class="dot" cx="66" cy="280" r="15"/><text class="num" x="66" y="285" text-anchor="middle">2</text>
+<text class="label b t-ink" x="96" y="276">The soak at the safe load</text>
+<text class="sub" x="96" y="296">p99 in 10 s windows</text>
+<circle class="dot" cx="66" cy="344" r="15"/><text class="num" x="66" y="349" text-anchor="middle">3</text>
+<text class="label b t-ink" x="96" y="340">The capacity plan</text>
+<text class="sub" x="96" y="360">ceil(2,000 / safe), minus a zone</text>
+<circle class="dot" cx="66" cy="408" r="15"/><text class="num" x="66" y="413" text-anchor="middle">4</text>
+<text class="label b t-ink" x="96" y="404">Full fleet, then zone loss</text>
+<text class="sub" x="96" y="424">2,000 rps; one zone stopped</text>
+<circle class="dot" cx="66" cy="472" r="15"/><text class="num" x="66" y="477" text-anchor="middle">5</text>
+<text class="label b t-ink" x="96" y="468">Pool sweep: the next limit</text>
+<text class="sub" x="96" y="488">pool of 20, then larger</text>
+<circle class="dot-w" cx="66" cy="536" r="15"/><text class="num" x="66" y="541" text-anchor="middle">5x</text>
+<text class="label b t-warn" x="96" y="532">A pool of 20 misses the SLO</text>
+<text class="sub" x="96" y="552">at the projected 2,000 rps</text>
+<circle class="dot" cx="66" cy="600" r="15"/><text class="num" x="66" y="605" text-anchor="middle">6</text>
+<text class="label b t-ink" x="96" y="596">Dependency frozen</text>
+<text class="sub" x="96" y="616">503 in 692.78 ms, bound 750 ms</text>
+<circle class="dot" cx="66" cy="664" r="15"/><text class="num" x="66" y="669" text-anchor="middle">7</text>
+<text class="label b t-ink" x="96" y="660">Rolling restart under load</text>
+<text class="sub" x="96" y="680">v1 to v2 and back, one by one</text>
+<circle class="dot" cx="66" cy="728" r="15"/><text class="num" x="66" y="733" text-anchor="middle">8</text>
+<text class="label b t-ink" x="96" y="724">Restore test</text>
+<text class="sub" x="96" y="744">28,467 rows match, 1.51 s</text>
+<circle class="dot-g" cx="66" cy="792" r="15"/><text class="num" x="66" y="797" text-anchor="middle">9</text>
+<text class="label b t-ink" x="96" y="788">Review and launch decision</text>
+<text class="sub" x="96" y="808">PASS, FAIL or ACCEPTED RISK</text>
+<path class="sync" d="M470 216H620"/>
+<text class="label t-accent" x="482" y="206">stepped rps</text>
+<path class="sync" d="M470 280H620"/>
+<text class="label t-accent" x="482" y="270">safe load</text>
+<path class="sync" d="M935 344H1086"/>
+<text class="label t-accent" x="947" y="334">safe load</text>
+<path class="sync" d="M470 408H620"/>
+<text class="label t-accent" x="482" y="398">2,000 rps</text>
+<path class="sync" d="M620 472H770"/>
+<text class="label t-accent" x="632" y="462">POST /entries</text>
+<path class="fail" d="M770 536H620"/>
+<text class="label t-warn" x="632" y="526">SLO missed</text>
+<path class="sync" d="M620 600H770"/>
+<text class="label t-accent" x="632" y="590">POST /entries</text>
+<path class="sync" d="M470 664H620"/>
+<text class="label t-accent" x="482" y="654">1,000 rps</text>
+<path class="sync" d="M770 728H935"/>
+<text class="label t-accent" x="782" y="718">dump, restore</text>
+<path class="sync" d="M935 792H1086"/>
+<text class="label t-accent" x="947" y="782">checklist</text>
+<rect class="win" x="500" y="772" width="300" height="40" rx="10"/>
+<text class="label b t-good" x="516" y="797">one launch decision, one page</text>
+<path class="sync" d="M48 836H112"/><text class="legend" x="124" y="841">sync call</text>
+<path class="fail" d="M696 836H760"/><text class="legend" x="772" y="841">failure path</text>
+</svg>
